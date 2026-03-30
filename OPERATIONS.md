@@ -216,12 +216,30 @@ Install them with:
 ```bash
 sudo cp deploy/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable NetworkManager-wait-online.service || true
+sudo systemctl enable systemd-networkd-wait-online.service || true
 sudo systemctl enable sovereign-sensor-ingest.service
 sudo systemctl enable sovereign-sensor-api.service
-sudo systemctl enable sovereign-sensor-nanobot.service
 sudo systemctl start sovereign-sensor-ingest.service
 sudo systemctl start sovereign-sensor-api.service
+```
+
+Recommended default boot profile:
+
+- Enable only `sovereign-sensor-ingest.service` and `sovereign-sensor-api.service` at boot.
+- Start `sovereign-sensor-nanobot.service` manually only when you want the WhatsApp or Nanobot layer online.
+
+Start Nanobot manually when needed:
+
+```bash
 sudo systemctl start sovereign-sensor-nanobot.service
+sudo systemctl status sovereign-sensor-nanobot.service
+```
+
+Stop it again when you no longer need it:
+
+```bash
+sudo systemctl stop sovereign-sensor-nanobot.service
 ```
 
 Check status with:
@@ -232,6 +250,10 @@ sudo systemctl status sovereign-sensor-api.service
 sudo systemctl status sovereign-sensor-nanobot.service
 journalctl -u sovereign-sensor-nanobot.service -f
 ```
+
+These units now wait on `network-online.target`, so after a reboot the stack starts automatically once the Pi has reached online network state.
+
+This deployment is not a Pod today. It is a set of host-level `systemd` services on the Raspberry Pi. Pod-style packaging is tracked separately in `SOLID_POD_IMPLEMENTATION.md`.
 
 ## What Is Still Missing
 

@@ -1,6 +1,7 @@
 [Unit]
 Description=Sovereign Sensor Agent Serial Ingest
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple

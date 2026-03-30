@@ -1,6 +1,7 @@
 [Unit]
 Description=Sovereign Sensor Agent Nanobot Gateway
-After=network.target sovereign-sensor-api.service
+Wants=network-online.target
+After=network-online.target sovereign-sensor-api.service
 Requires=sovereign-sensor-api.service
 
 [Service]

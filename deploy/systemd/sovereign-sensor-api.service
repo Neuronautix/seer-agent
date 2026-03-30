@@ -1,6 +1,7 @@
 [Unit]
 Description=Sovereign Sensor Agent API
-After=network.target sovereign-sensor-ingest.service
+Wants=network-online.target
+After=network-online.target sovereign-sensor-ingest.service
 Requires=sovereign-sensor-ingest.service
 
 [Service]

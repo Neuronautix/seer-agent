@@ -492,6 +492,24 @@ sudo systemctl start sovereign-sensor-ingest.service
 sudo systemctl start sovereign-sensor-api.service
 ```
 
+Recommended default boot profile:
+
+- Keep ingest and API enabled at boot.
+- Keep Nanobot manual, so WhatsApp only comes online when you explicitly start it.
+
+Start Nanobot manually when needed:
+
+```bash
+sudo systemctl start sovereign-sensor-nanobot.service
+sudo systemctl status sovereign-sensor-nanobot.service
+```
+
+Stop it when you no longer need the WhatsApp or Nanobot layer:
+
+```bash
+sudo systemctl stop sovereign-sensor-nanobot.service
+```
+
 ### Inspect service status and logs
 
 ```bash
@@ -655,6 +673,7 @@ Recommended publication approach:
 ### Long-Term TODO
 
 - Package the service for repeatable deployment on new Raspberry Pi devices.
+- Define and implement a solid Pod-style deployment package. See `SOLID_POD_IMPLEMENTATION.md`.
 - Support multiple sensor devices and multiple named sources.
 - Add authenticated dashboard or lightweight UI.
 - Add provider adapters for Twilio or Meta WhatsApp.
