@@ -8,40 +8,19 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
+
+from observation_analysis import evaluate_thresholds, read_recent_observations, summarize_window
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LATEST_PATH = SCRIPT_DIR.parent / "logs" / "latest-observation.json"
+DEFAULT_LOG_PATH = SCRIPT_DIR.parent / "logs" / "validated-observations.jsonl"
 
 METRICS = {
     "temperature": {"field": "temperatureC", "unit": "C"},
     "humidity": {"field": "humidityPct", "unit": "%"},
     "pressure": {"field": "pressureHpa", "unit": "hPa"},
 }
-
-THRESHOLDS: dict[str, dict[str, float | str]] = {
-    "temperature": {
-        "field": "temperatureC",
-        "unit": "C",
-        "warningMax": 28.0,
-        "criticalMax": 35.0,
-    },
-    "humidity": {
-        "field": "humidityPct",
-        "unit": "%",
-        "warningMax": 70.0,
-        "criticalMax": 85.0,
-    },
-    "pressure": {
-        "field": "pressureHpa",
-        "unit": "hPa",
-        "warningMin": 980.0,
-        "warningMax": 1035.0,
-        "criticalMin": 960.0,
-        "criticalMax": 1060.0,
-    },
-}
-
 
 def load_latest_observation(latest_path: Path) -> dict[str, Any]:
     if not latest_path.exists():
@@ -75,6 +54,8 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
             "/latest/humidity",
             "/latest/pressure",
             "/latest/threshold-status",
+            "/latest/alarm-status",
+            "/summary?count=10&subject=all",
             "/webhook",
         ],
     }
@@ -96,46 +77,28 @@ def build_metric_payload(observation: dict[str, Any], metric_name: str, field_na
 
 
 def build_threshold_payload(observation: dict[str, Any]) -> dict[str, Any]:
-    threshold_status: dict[str, Any] = {}
-    for metric_name, config in THRESHOLDS.items():
-        field = str(config["field"])
-        if field not in observation:
-            threshold_status[metric_name] = {
-                "available": False,
-                "unit": config["unit"],
-                "status": "unavailable",
-            }
-            continue
-        value = float(observation[field])
-        threshold_status[metric_name] = {
-            "available": True,
-            "value": value,
-            "unit": config["unit"],
-            "status": metric_status(value, config),
-            "thresholds": {key: threshold for key, threshold in config.items() if key not in {"field", "unit"}},
-        }
-
+    evaluation = evaluate_thresholds(observation, {"thresholds": {}})
     return {
         "ok": True,
         "observedAt": observation.get("observedAt"),
         "sensorId": observation.get("sensorId"),
         "sourcePort": observation.get("sourcePort"),
         "schemaVersion": observation.get("schemaVersion"),
-        "thresholdStatus": threshold_status,
+        **evaluation,
     }
 
 
-def metric_status(value: float, config: dict[str, float | str]) -> str:
-    critical_min = float(config.get("criticalMin", float("-inf")))
-    critical_max = float(config.get("criticalMax", float("inf")))
-    warning_min = float(config.get("warningMin", float("-inf")))
-    warning_max = float(config.get("warningMax", float("inf")))
-
-    if value <= critical_min or value >= critical_max:
-        return "critical"
-    if value <= warning_min or value >= warning_max:
-        return "warning"
-    return "normal"
+def build_summary_payload(log_path: Path, count: int, subject: str) -> dict[str, Any]:
+    observations = read_recent_observations(log_path, count=count)
+    payload = summarize_window(observations, {"thresholds": {}}, requested_count=count, subject=subject)
+    payload.update(
+        {
+            "sensorId": observations[-1].get("sensorId"),
+            "sourcePort": observations[-1].get("sourcePort"),
+            "schemaVersion": observations[-1].get("schemaVersion"),
+        }
+    )
+    return payload
 
 
 def extract_message_text(body: bytes, content_type: str) -> str:
@@ -222,40 +185,90 @@ def build_chat_reply(message_text: str, observation: dict[str, Any]) -> dict[str
     return {"ok": True, "reply": reply, "action": "help"}
 
 
-def route_request(path: str, latest_path: Path) -> tuple[int, dict[str, Any]]:
-    if path == "/":
+def build_summary_reply(summary_payload: dict[str, Any], subject: str) -> str:
+    metric_names = [subject] if subject != "all" else ["temperature", "humidity", "pressure"]
+    parts: list[str] = []
+    for metric_name in metric_names:
+        metric_summary = summary_payload["summary"].get(metric_name)
+        if not isinstance(metric_summary, dict):
+            continue
+        if metric_summary.get("available") is False:
+            parts.append(f"{metric_name} unavailable")
+            continue
+        parts.append(
+            f"{metric_name} avg {metric_summary['average']} {metric_summary['unit']}, "
+            f"min {metric_summary['minimum']}, max {metric_summary['maximum']}, latest {metric_summary['latest']}"
+        )
+    return (
+        f"Summary over last {summary_payload['window']['actualCount']} observations: {'; '.join(parts)}. "
+        f"Window {summary_payload['window']['observedFrom']} to {summary_payload['window']['observedTo']}."
+    )
+
+
+def route_request(path: str, latest_path: Path, log_path: Path) -> tuple[int, dict[str, Any]]:
+    parsed = urlparse(path)
+    if parsed.path == "/":
         return HTTPStatus.OK, build_root_payload(latest_path)
 
-    if path == "/health":
+    if parsed.path == "/health":
         return HTTPStatus.OK, build_health_payload(latest_path)
+
+    if parsed.path == "/summary":
+        params = parse_qs(parsed.query, keep_blank_values=False)
+        count = int(params.get("count", ["10"])[0])
+        subject = params.get("subject", ["all"])[0].strip().lower()
+        return HTTPStatus.OK, build_summary_payload(log_path, count=count, subject=subject)
 
     observation = load_latest_observation(latest_path)
 
-    if path == "/latest":
+    if parsed.path == "/latest":
         return HTTPStatus.OK, observation
-    if path == "/latest/temp":
+    if parsed.path == "/latest/temp":
         return HTTPStatus.OK, build_metric_payload(observation, "temperature", "temperatureC", "C")
-    if path == "/latest/humidity":
+    if parsed.path == "/latest/humidity":
         return HTTPStatus.OK, build_metric_payload(observation, "humidity", "humidityPct", "%")
-    if path == "/latest/pressure":
+    if parsed.path == "/latest/pressure":
         return HTTPStatus.OK, build_metric_payload(observation, "pressure", "pressureHpa", "hPa")
-    if path == "/latest/threshold-status":
+    if parsed.path == "/latest/threshold-status":
+        return HTTPStatus.OK, build_threshold_payload(observation)
+    if parsed.path == "/latest/alarm-status":
         return HTTPStatus.OK, build_threshold_payload(observation)
 
     return HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"}
 
 
-def route_webhook(body: bytes, content_type: str, latest_path: Path) -> tuple[int, dict[str, Any]]:
+def route_webhook(body: bytes, content_type: str, latest_path: Path, log_path: Path) -> tuple[int, dict[str, Any]]:
     observation = load_latest_observation(latest_path)
     message_text = extract_message_text(body, content_type)
+    normalized = " ".join(message_text.lower().split())
+    if any(keyword in normalized for keyword in ("summary", "average", "avg", "recent", "last")):
+        params = parse_qs("")
+        del params
+        count = 10
+        for token in normalized.split():
+            if token.isdigit():
+                count = int(token)
+                break
+        subject = "all"
+        for metric_name in METRICS:
+            if metric_name in normalized:
+                subject = metric_name
+                break
+        summary_payload = build_summary_payload(log_path, count=count, subject=subject)
+        return HTTPStatus.OK, {
+            "ok": True,
+            "reply": build_summary_reply(summary_payload, subject),
+            "action": "summarize_window",
+            "data": summary_payload,
+        }
     return HTTPStatus.OK, build_chat_reply(message_text, observation)
 
 
-def make_handler(latest_path: Path):
+def make_handler(latest_path: Path, log_path: Path):
     class ApiHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             try:
-                status, payload = route_request(self.path, latest_path)
+                status, payload = route_request(self.path, latest_path, log_path)
             except (FileNotFoundError, ValueError) as exc:
                 status = HTTPStatus.SERVICE_UNAVAILABLE
                 payload = {"ok": False, "error": str(exc)}
@@ -277,7 +290,7 @@ def make_handler(latest_path: Path):
             body = self.rfile.read(content_length)
 
             try:
-                status, payload = route_webhook(body, content_type, latest_path)
+                status, payload = route_webhook(body, content_type, latest_path, log_path)
             except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
                 status = HTTPStatus.BAD_REQUEST
                 payload = {"ok": False, "error": str(exc)}
@@ -314,13 +327,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--latest-file", default=str(DEFAULT_LATEST_PATH))
+    parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     latest_path = Path(args.latest_file)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(latest_path))
+    log_path = Path(args.log_file)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(latest_path, log_path))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
