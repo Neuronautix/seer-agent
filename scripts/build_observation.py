@@ -72,7 +72,7 @@ def _to_float(name: str, value: Any) -> float:
 def build_observation(payload: Mapping[str, Any]) -> dict[str, Any]:
     temperature = _to_float("temperature_c", payload.get("temperature_c"))
     humidity = _to_float("humidity_pct", payload.get("humidity_pct"))
-    pressure = _to_float("pressure_hpa", payload.get("pressure_hpa"))
+    pressure_value = payload.get("pressure_hpa")
     observed_at = normalize_timestamp(payload.get("timestamp"))
     sensor_id = str(payload.get("sensor_id") or DEFAULT_SENSOR_ID).strip()
     device = str(payload.get("device") or DEFAULT_DEVICE).strip()
@@ -82,7 +82,7 @@ def build_observation(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not device.startswith("/"):
         raise ValueError("device must be an absolute path")
 
-    return {
+    observation = {
         "@context": dict(JSONLD_CONTEXT),
         "@type": OBSERVATION_TYPE,
         "schemaVersion": SCHEMA_VERSION,
@@ -91,8 +91,10 @@ def build_observation(payload: Mapping[str, Any]) -> dict[str, Any]:
         "observedAt": observed_at,
         "temperatureC": temperature,
         "humidityPct": humidity,
-        "pressureHpa": pressure,
     }
+    if pressure_value is not None:
+        observation["pressureHpa"] = _to_float("pressure_hpa", pressure_value)
+    return observation
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

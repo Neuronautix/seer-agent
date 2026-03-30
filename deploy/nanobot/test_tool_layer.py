@@ -46,14 +46,21 @@ async def main() -> int:
                 print(json.dumps({"ok": False, "error": "latest observation tool returned failure"}))
                 return 1
 
-            metrics: dict[str, float] = {}
+            metrics: dict[str, float | str] = {}
             for metric_name in ("temperature", "humidity", "pressure"):
                 metric_result = await session.call_tool("get_metric", arguments={"metric": metric_name})
                 metric_payload = json.loads(flatten_text(metric_result))
-                if not metric_payload.get("ok") or metric_payload.get("metric") != metric_name:
+                if metric_payload.get("ok"):
+                    if metric_payload.get("metric") != metric_name:
+                        print(json.dumps({"ok": False, "error": f"metric tool returned mismatched metric for {metric_name}"}))
+                        return 1
+                    metrics[metric_name] = float(metric_payload["value"])
+                    continue
+
+                if metric_name != "pressure":
                     print(json.dumps({"ok": False, "error": f"metric tool failed for {metric_name}"}))
                     return 1
-                metrics[metric_name] = float(metric_payload["value"])
+                metrics[metric_name] = "unavailable"
 
             threshold_result = await session.call_tool("get_threshold_status", arguments={})
             threshold_payload = json.loads(flatten_text(threshold_result))

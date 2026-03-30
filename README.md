@@ -1,6 +1,6 @@
 # Sovereign Sensor Agent
 
-Deterministic Arduino sensor ingestion and read-only local agent interface for temperature, humidity, and pressure.
+Deterministic Arduino sensor ingestion and read-only local agent interface for temperature, humidity, and optional pressure.
 
 This repository is designed around a strict boundary: the Arduino and Python pipeline are the source of truth, while any LLM or chat interface is limited to reading validated local data. The project is intended for local-first deployments such as a Raspberry Pi connected to an Arduino over serial, with an optional messaging layer on top.
 
@@ -29,7 +29,8 @@ This architecture is intentionally conservative. The LLM does not generate canon
 ## Current Capabilities
 
 - Serial ingestion from `/dev/ttyACM*` or `/dev/ttyUSB*` devices.
-- Parsing of deterministic Arduino lines in the form `TEMP=...;HUM=...;PRESS=...;TS=...`.
+- Parsing of deterministic Arduino lines in the form `TEMP=...;HUM=...;TS=...` with optional `PRESS=...`.
+- Parsing of human-readable Arduino output blocks such as `Temperature = ...` and `Humidity = ...`.
 - Canonical JSON-LD observation generation.
 - Schema validation and additional range and timestamp checks.
 - Append-only validated observation log.
@@ -85,10 +86,10 @@ The high-level data flow is:
   Returns the latest validated observation.
 
 - `workspace/tools/get_metric.py`
-  Returns a single validated metric: temperature, humidity, or pressure.
+  Returns a single validated metric: temperature, humidity, or pressure when present.
 
 - `workspace/tools/get_threshold_status.py`
-  Returns threshold status for temperature, humidity, and pressure.
+  Returns threshold status for temperature, humidity, and pressure, marking missing metrics as unavailable.
 
 ### LLM Constraint Layer
 
@@ -169,15 +170,27 @@ groups
 
 ## Expected Arduino Serial Format
 
-The ingestion script expects lines like this:
+The ingestion script accepts either a canonical single-line format or a simple human-readable multi-line format.
+
+Canonical format with optional pressure:
 
 ```text
+TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z
 TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z
+```
+
+Human-readable format:
+
+```text
+Temperature = 19.95 °C
+Humidity    = 37.28 %
 ```
 
 Rules:
 
-- `TEMP`, `HUM`, `PRESS`, and `TS` are required.
+- `TEMP`, `HUM`, and `TS` are required in canonical format.
+- `PRESS` is optional.
+- Human-readable blocks must include temperature and humidity. Pressure may be omitted.
 - Duplicate fields are rejected.
 - Extra fields are rejected.
 - Values must be numeric where required.
@@ -208,6 +221,14 @@ If your board appears under a different path, replace `/dev/ttyACM0` accordingly
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
 printf 'TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z\n' \
+  | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
+```
+
+This also works without pressure:
+
+```bash
+cd /home/dhuzard/sovereign-sensor-agent
+printf 'TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
 
@@ -264,6 +285,8 @@ cd /home/dhuzard/sovereign-sensor-agent
 ./.venv/bin/python workspace/tools/get_threshold_status.py
 ```
 
+If the connected device does not emit pressure, the pressure command returns an unavailable error while temperature and humidity remain live.
+
 ### Verify the Nanobot tool layer
 
 This verifies the MCP shim exposes only the intended read-only tools and that those tools read validated local files.
@@ -276,7 +299,8 @@ cd /home/dhuzard/sovereign-sensor-agent
 Expected result:
 
 - Tool names include `get_latest_observation`, `get_metric`, and `get_threshold_status`.
-- Metric and threshold queries return `ok: true` payloads.
+- Temperature and humidity queries return `ok: true` payloads.
+- Pressure returns a value when the sensor provides it, otherwise it reports unavailable.
 - The tool layer reads from the validated wrappers in `workspace/tools/`.
 
 ### Ask the Nanobot agent local sensor questions
@@ -329,11 +353,11 @@ Returns the latest validated humidity.
 
 ### `GET /latest/pressure`
 
-Returns the latest validated pressure.
+Returns the latest validated pressure when the sensor provides it. If pressure is absent from the latest observation, the endpoint returns an unavailable error.
 
 ### `GET /latest/threshold-status`
 
-Returns threshold evaluations for temperature, humidity, and pressure.
+Returns threshold evaluations for temperature, humidity, and pressure. Missing metrics are reported as `unavailable` instead of failing the whole response.
 
 ### `POST /webhook`
 
@@ -362,7 +386,7 @@ Typical supported questions:
 
 - temperature
 - humidity
-- pressure
+- pressure, when the sensor provides it
 - threshold status
 
 ## Logs and Data Files
@@ -487,7 +511,7 @@ The current codebase has passing tests for:
 - API metric endpoints
 - webhook behavior
 - supervisor responses
-- pressure support across the stack
+- optional pressure support across the stack
 
 ## WhatsApp Integration Status
 
@@ -592,6 +616,7 @@ Expected behavior:
 
 - Nanobot answers briefly using the read-only sensor tools.
 - Replies come from validated local data, not from the serial device directly.
+- Pressure may be reported as unavailable if the connected sensor does not emit it.
 - Group chats remain quiet unless the linked account is mentioned when `NANOBOT_WHATSAPP_GROUP_POLICY=mention`.
 
 If `gateway` logs `Connect call failed ('127.0.0.1', 3001)`, the WhatsApp bridge is not running yet.

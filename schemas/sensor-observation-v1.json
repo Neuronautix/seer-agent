@@ -13,8 +13,7 @@
     "sourcePort",
     "observedAt",
     "temperatureC",
-    "humidityPct",
-    "pressureHpa"
+    "humidityPct"
   ],
   "properties": {
     "@context": {
@@ -27,8 +26,7 @@
         "sourcePort",
         "observedAt",
         "temperatureC",
-        "humidityPct",
-        "pressureHpa"
+        "humidityPct"
       ],
       "properties": {
         "@vocab": {

@@ -149,10 +149,16 @@ def handle_get_threshold_status(log_path: Path, config: dict[str, Any]) -> dict[
         metric_config = _metric_config(config, metric_name)
         observation_key = metric_config.get("metric")
         if not isinstance(observation_key, str) or observation_key not in observation:
-            raise ValueError(f"latest observation missing {metric_name} metric")
+            response["thresholdStatus"][metric_name] = {
+                "available": False,
+                "unit": metric_config["unit"],
+                "status": "unavailable",
+            }
+            continue
 
         value = float(observation[observation_key])
         response["thresholdStatus"][metric_name] = {
+            "available": True,
             "value": value,
             "unit": metric_config["unit"],
             "status": _metric_status(value, metric_config),

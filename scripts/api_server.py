@@ -81,6 +81,8 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
 
 
 def build_metric_payload(observation: dict[str, Any], metric_name: str, field_name: str, unit: str) -> dict[str, Any]:
+    if field_name not in observation:
+        raise ValueError(f"latest observation missing {metric_name} metric")
     return {
         "ok": True,
         "metric": metric_name,
@@ -97,8 +99,16 @@ def build_threshold_payload(observation: dict[str, Any]) -> dict[str, Any]:
     threshold_status: dict[str, Any] = {}
     for metric_name, config in THRESHOLDS.items():
         field = str(config["field"])
+        if field not in observation:
+            threshold_status[metric_name] = {
+                "available": False,
+                "unit": config["unit"],
+                "status": "unavailable",
+            }
+            continue
         value = float(observation[field])
         threshold_status[metric_name] = {
+            "available": True,
             "value": value,
             "unit": config["unit"],
             "status": metric_status(value, config),
@@ -176,13 +186,32 @@ def build_chat_reply(message_text: str, observation: dict[str, Any]) -> dict[str
         parts = []
         for metric_name in ("temperature", "humidity", "pressure"):
             metric = payload["thresholdStatus"][metric_name]
-            parts.append(f"{metric_name} {metric['value']} {metric['unit']} ({metric['status']})")
+            if metric.get("available") is False:
+                parts.append(f"{metric_name} unavailable")
+            else:
+                parts.append(f"{metric_name} {metric['value']} {metric['unit']} ({metric['status']})")
         reply = f"Threshold status: {'; '.join(parts)}. Observed at {payload['observedAt']}."
         return {"ok": True, "reply": reply, "action": "get_threshold_status", "data": payload}
 
     for metric_name, config in METRICS.items():
         if metric_name in normalized:
-            payload = build_metric_payload(observation, metric_name, config["field"], config["unit"])
+            try:
+                payload = build_metric_payload(observation, metric_name, config["field"], config["unit"])
+            except ValueError:
+                return {
+                    "ok": True,
+                    "reply": f"{metric_name.capitalize()} is currently unavailable from the latest observation.",
+                    "action": "read_latest",
+                    "data": {
+                        "ok": False,
+                        "metric": metric_name,
+                        "error": f"latest observation missing {metric_name} metric",
+                        "observedAt": observation.get("observedAt"),
+                        "sensorId": observation.get("sensorId"),
+                        "sourcePort": observation.get("sourcePort"),
+                        "schemaVersion": observation.get("schemaVersion"),
+                    },
+                }
             reply = f"{metric_name.capitalize()} is {payload['value']} {payload['unit']} at {payload['observedAt']}."
             return {"ok": True, "reply": reply, "action": "read_latest", "data": payload}
 

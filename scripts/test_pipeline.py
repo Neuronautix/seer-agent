@@ -17,7 +17,7 @@ from pathlib import Path
 from build_observation import build_observation, normalize_timestamp
 from api_server import make_handler
 from ontology_guard import load_schema, validate_observation
-from read_serial import ingest_stream, parse_sensor_line, set_serial_baud_rate
+from read_serial import ingest_stream, parse_human_readable_sensor_field, parse_sensor_line, set_serial_baud_rate
 
 
 class PipelineTests(unittest.TestCase):
@@ -30,6 +30,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(parsed["humidity_pct"], 51.2)
         self.assertEqual(parsed["pressure_hpa"], 1008.7)
         self.assertEqual(parsed["timestamp"], "2026-03-29T11:12:13Z")
+
+    def test_parse_sensor_line_without_pressure(self) -> None:
+        parsed = parse_sensor_line("TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n")
+        self.assertEqual(parsed["temperature_c"], 23.4)
+        self.assertEqual(parsed["humidity_pct"], 51.2)
+        self.assertNotIn("pressure_hpa", parsed)
+
+    def test_parse_human_readable_sensor_field(self) -> None:
+        self.assertEqual(
+            parse_human_readable_sensor_field("Temperature = 19.95 °C\n"),
+            ("temperature_c", 19.95),
+        )
+        self.assertEqual(
+            parse_human_readable_sensor_field("Humidity    = 37.28 %\n"),
+            ("humidity_pct", 37.28),
+        )
+        self.assertIsNone(parse_human_readable_sensor_field("ignored text\n"))
 
     def test_set_serial_baud_rate_falls_back_without_cfset_functions(self) -> None:
         attributes = [0, 0, 0, 0, 0, 0, []]
@@ -59,6 +76,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(validated["pressureHpa"], 1008.7)
         self.assertEqual(validated["sourcePort"], "/dev/ttyUSB0")
         self.assertEqual(validated["schemaVersion"], "sensor-observation-v1")
+
+    def test_build_and_validate_observation_without_pressure(self) -> None:
+        observation = build_observation(
+            {
+                "temperature_c": 23.4,
+                "humidity_pct": 51.2,
+                "timestamp": "2026-03-29T11:12:13Z",
+                "device": "/dev/ttyUSB0",
+                "sensor_id": "arduino-ttyUSB0",
+            }
+        )
+        validated = validate_observation(observation, self.schema)
+        self.assertNotIn("pressureHpa", validated)
 
     def test_timestamp_is_normalized_to_canonical_utc_z(self) -> None:
         self.assertEqual(normalize_timestamp("2026-03-29T13:12:13+02:00"), "2026-03-29T11:12:13Z")
@@ -203,6 +233,41 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(latest["pressureHpa"], 1005.8)
             self.assertEqual(latest["sensorId"], "arduino-nano-33-ble-sense-rev2")
 
+    def test_ingest_stream_accepts_human_readable_temp_humidity_blocks(self) -> None:
+        output = io.StringIO()
+        errors = io.StringIO()
+        lines = [
+            "Temperature = 19.95 °C\n",
+            "Humidity    = 37.28 %\n",
+            "\n",
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            log_path = temp_path / "validated-observations.jsonl"
+            latest_path = temp_path / "latest-observation.json"
+            rejection_log_path = temp_path / "rejected-lines.jsonl"
+            ingest_stream(
+                lines,
+                device="/dev/ttyACM0",
+                sensor_id="arduino-ttyACM0",
+                log_path=log_path,
+                latest_path=latest_path,
+                rejection_log_path=rejection_log_path,
+                schema=self.schema,
+                stderr=errors,
+                stdout=output,
+            )
+
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            self.assertEqual(latest["temperatureC"], 19.95)
+            self.assertEqual(latest["humidityPct"], 37.28)
+            self.assertNotIn("pressureHpa", latest)
+            self.assertEqual(latest["sensorId"], "arduino-ttyACM0")
+            self.assertEqual(latest["sourcePort"], "/dev/ttyACM0")
+            self.assertTrue(latest["observedAt"].endswith("Z"))
+            self.assertEqual(errors.getvalue(), "")
+
     def test_api_latest_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             latest_path = Path(temp_dir) / "latest-observation.json"
@@ -243,7 +308,6 @@ class PipelineTests(unittest.TestCase):
                 latest = json.loads(urllib.request.urlopen(f"{base_url}/latest").read().decode("utf-8"))
                 temp = json.loads(urllib.request.urlopen(f"{base_url}/latest/temp").read().decode("utf-8"))
                 humidity = json.loads(urllib.request.urlopen(f"{base_url}/latest/humidity").read().decode("utf-8"))
-                pressure = json.loads(urllib.request.urlopen(f"{base_url}/latest/pressure").read().decode("utf-8"))
                 threshold_status = json.loads(
                     urllib.request.urlopen(f"{base_url}/latest/threshold-status").read().decode("utf-8")
                 )
@@ -254,13 +318,70 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(latest["pressureHpa"], 1008.7)
                 self.assertEqual(temp["value"], 23.4)
                 self.assertEqual(humidity["value"], 51.2)
-                self.assertEqual(pressure["value"], 1008.7)
                 self.assertEqual(threshold_status["thresholdStatus"]["pressure"]["status"], "normal")
 
                 request = urllib.request.Request(f"{base_url}/latest", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as error:
                     urllib.request.urlopen(request)
                 self.assertEqual(error.exception.code, 405)
+
+                request = urllib.request.Request(f"{base_url}/latest/pressure", method="GET")
+                pressure_error = None
+                try:
+                    urllib.request.urlopen(request)
+                except urllib.error.HTTPError as exc:
+                    pressure_error = exc
+                self.assertIsNone(pressure_error)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_api_pressure_endpoint_reports_unavailable_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            latest_path.write_text(
+                json.dumps(
+                    {
+                        "@context": {
+                            "@vocab": "https://sovereign-sensor-agent.local/ontology#",
+                            "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
+                            "sensorId": "https://schema.org/identifier",
+                            "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
+                            "observedAt": "https://schema.org/observationDate",
+                            "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
+                            "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
+                            "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+                        },
+                        "@type": "SensorObservation",
+                        "schemaVersion": "sensor-observation-v1",
+                        "sensorId": "arduino-ttyACM0",
+                        "sourcePort": "/dev/ttyACM0",
+                        "observedAt": "2026-03-30T11:42:23Z",
+                        "temperatureC": 19.76,
+                        "humidityPct": 37.52
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path))
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(f"{base_url}/latest/pressure")
+                self.assertEqual(error.exception.code, 503)
+                payload = json.loads(error.exception.read().decode("utf-8"))
+                self.assertIn("missing pressure metric", payload["error"])
+
+                threshold_status = json.loads(
+                    urllib.request.urlopen(f"{base_url}/latest/threshold-status").read().decode("utf-8")
+                )
+                self.assertEqual(threshold_status["thresholdStatus"]["pressure"]["status"], "unavailable")
+                self.assertFalse(threshold_status["thresholdStatus"]["pressure"]["available"])
             finally:
                 server.shutdown()
                 server.server_close()

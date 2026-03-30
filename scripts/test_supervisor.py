@@ -23,10 +23,10 @@ class SupervisorTests(unittest.TestCase):
         *,
         temperature: float = 23.4,
         humidity: float = 51.2,
-        pressure: float = 1008.7,
+        pressure: float | None = 1008.7,
         observed_at: str = "2026-03-29T11:12:13Z",
     ) -> dict[str, object]:
-        return {
+        observation = {
             "@context": {
                 "@vocab": "https://sovereign-sensor-agent.local/ontology#",
                 "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
@@ -44,8 +44,10 @@ class SupervisorTests(unittest.TestCase):
             "observedAt": observed_at,
             "temperatureC": temperature,
             "humidityPct": humidity,
-            "pressureHpa": pressure,
         }
+        if pressure is not None:
+            observation["pressureHpa"] = pressure
+        return observation
 
     def test_read_latest_observation_returns_last_record(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -166,6 +168,29 @@ class SupervisorTests(unittest.TestCase):
 
             self.assertEqual(response["thresholdStatus"]["temperature"]["status"], "normal")
             self.assertEqual(response["thresholdStatus"]["humidity"]["status"], "normal")
+
+    def test_get_threshold_status_marks_pressure_unavailable_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            write_jsonl(log_path, [self.make_observation(pressure=None)])
+
+            response = execute_action(
+                "get_threshold_status",
+                None,
+                log_path=log_path,
+                config=load_config(),
+            )
+
+            self.assertEqual(response["thresholdStatus"]["pressure"]["status"], "unavailable")
+            self.assertFalse(response["thresholdStatus"]["pressure"]["available"])
+
+    def test_read_latest_pressure_fails_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            write_jsonl(log_path, [self.make_observation(pressure=None)])
+
+            with self.assertRaisesRegex(ValueError, "missing pressure metric"):
+                execute_action("read_latest", "pressure", log_path=log_path, config=load_config())
 
     def test_invalid_subject_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

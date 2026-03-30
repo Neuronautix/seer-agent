@@ -89,8 +89,16 @@ def main() -> int:
         threshold_status: dict[str, Any] = {}
         for metric_name, config in THRESHOLDS.items():
             field = str(config["field"])
+            if field not in observation:
+                threshold_status[metric_name] = {
+                    "available": False,
+                    "unit": config["unit"],
+                    "status": "unavailable",
+                }
+                continue
             value = float(observation[field])
             threshold_status[metric_name] = {
+                "available": True,
                 "value": value,
                 "unit": config["unit"],
                 "status": metric_status(value, config),

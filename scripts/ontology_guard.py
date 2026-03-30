@@ -78,7 +78,8 @@ def validate_observation(
     _ensure_observed_at(observation.get("observedAt"))
     _ensure_range("temperatureC", observation.get("temperatureC"), -40.0, 85.0)
     _ensure_range("humidityPct", observation.get("humidityPct"), 0.0, 100.0)
-    _ensure_range("pressureHpa", observation.get("pressureHpa"), 300.0, 1100.0)
+    if "pressureHpa" in observation:
+        _ensure_range("pressureHpa", observation.get("pressureHpa"), 300.0, 1100.0)
     return dict(observation)
 
 

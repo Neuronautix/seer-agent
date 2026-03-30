@@ -6,6 +6,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import termios
 from datetime import UTC, datetime
@@ -29,6 +30,12 @@ BAUD_RATES = {
     38400: termios.B38400,
     57600: termios.B57600,
     115200: termios.B115200,
+}
+
+HUMAN_READABLE_FIELD_PATTERNS = {
+    "temperature_c": re.compile(r"^Temperature\s*=\s*([-+]?\d+(?:\.\d+)?)\s*(?:°?C)?\s*$", re.IGNORECASE),
+    "humidity_pct": re.compile(r"^Humidity\s*=\s*([-+]?\d+(?:\.\d+)?)\s*%?\s*$", re.IGNORECASE),
+    "pressure_hpa": re.compile(r"^Pressure\s*=\s*([-+]?\d+(?:\.\d+)?)\s*(?:hPa)?\s*$", re.IGNORECASE),
 }
 
 
@@ -63,21 +70,41 @@ def parse_sensor_line(line: str) -> dict[str, Any]:
         fields[normalized_key] = value.strip()
 
     required = {"TEMP", "HUM", "TS"}
-    required = {"TEMP", "HUM", "PRESS", "TS"}
     missing = sorted(required.difference(fields))
     if missing:
         raise ValueError(f"missing fields: {', '.join(missing)}")
 
-    extra = sorted(set(fields).difference(required))
+    allowed = set(required) | {"PRESS"}
+    extra = sorted(set(fields).difference(allowed))
     if extra:
         raise ValueError(f"unexpected fields: {', '.join(extra)}")
+
+    if "PRESS" in fields:
+        return {
+            "temperature_c": float(fields["TEMP"]),
+            "humidity_pct": float(fields["HUM"]),
+            "pressure_hpa": float(fields["PRESS"]),
+            "timestamp": fields["TS"],
+        }
 
     return {
         "temperature_c": float(fields["TEMP"]),
         "humidity_pct": float(fields["HUM"]),
-        "pressure_hpa": float(fields["PRESS"]),
         "timestamp": fields["TS"],
     }
+
+
+def parse_human_readable_sensor_field(line: str) -> tuple[str, float] | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    for field_name, pattern in HUMAN_READABLE_FIELD_PATTERNS.items():
+        match = pattern.match(stripped)
+        if match is not None:
+            return field_name, float(match.group(1))
+
+    return None
 
 
 def append_jsonl(log_path: Path, observation: dict[str, Any]) -> None:
@@ -150,6 +177,41 @@ def process_line(
     return True
 
 
+def process_payload(
+    payload: dict[str, Any],
+    *,
+    device: str,
+    sensor_id: str,
+    log_path: Path,
+    latest_path: Path,
+    rejection_log_path: Path | None,
+    schema: dict[str, Any],
+    stderr: TextIO,
+    stdout: TextIO | None = None,
+) -> bool:
+    try:
+        payload["device"] = device
+        payload["sensor_id"] = sensor_id
+        observation = build_observation(payload)
+        validated = validate_observation(observation, schema)
+    except ValueError as exc:
+        raw_line = json.dumps(payload, separators=(",", ":"))
+        log_rejected_line(
+            raw_line=raw_line,
+            error=str(exc),
+            device=device,
+            stderr=stderr,
+            rejection_log_path=rejection_log_path,
+        )
+        return False
+
+    append_jsonl(log_path, validated)
+    write_latest_observation(latest_path, validated)
+    target_stdout = stdout if stdout is not None else sys.stdout
+    print(json.dumps(validated, separators=(",", ":")), file=target_stdout, flush=True)
+    return True
+
+
 def ingest_stream(
     stream: Iterable[str],
     *,
@@ -164,18 +226,68 @@ def ingest_stream(
     max_lines: int | None = None,
 ) -> int:
     processed = 0
+    partial_payload: dict[str, Any] = {}
+
     for raw_line in stream:
-        process_line(
-            raw_line,
-            device=device,
-            sensor_id=sensor_id,
-            log_path=log_path,
-            latest_path=latest_path,
-            rejection_log_path=rejection_log_path,
-            schema=schema,
-            stderr=stderr,
-            stdout=stdout,
-        )
+        try:
+            payload = parse_sensor_line(raw_line)
+        except ValueError:
+            parsed_field = parse_human_readable_sensor_field(raw_line)
+            stripped = raw_line.strip()
+
+            if parsed_field is not None:
+                field_name, value = parsed_field
+                partial_payload[field_name] = value
+            elif not stripped:
+                if "temperature_c" in partial_payload and "humidity_pct" in partial_payload:
+                    partial_payload["timestamp"] = datetime.now(tz=UTC).isoformat(timespec="seconds").replace(
+                        "+00:00", "Z"
+                    )
+                    if process_payload(
+                        dict(partial_payload),
+                        device=device,
+                        sensor_id=sensor_id,
+                        log_path=log_path,
+                        latest_path=latest_path,
+                        rejection_log_path=rejection_log_path,
+                        schema=schema,
+                        stderr=stderr,
+                        stdout=stdout,
+                    ):
+                        pass
+                    partial_payload.clear()
+                elif partial_payload:
+                    log_rejected_line(
+                        raw_line=raw_line,
+                        error="incomplete human-readable sensor block",
+                        device=device,
+                        stderr=stderr,
+                        rejection_log_path=rejection_log_path,
+                    )
+                    partial_payload.clear()
+            else:
+                log_rejected_line(
+                    raw_line=raw_line,
+                    error="missing fields: HUM, PRESS, TEMP, TS",
+                    device=device,
+                    stderr=stderr,
+                    rejection_log_path=rejection_log_path,
+                )
+        else:
+            if process_payload(
+                payload,
+                device=device,
+                sensor_id=sensor_id,
+                log_path=log_path,
+                latest_path=latest_path,
+                rejection_log_path=rejection_log_path,
+                schema=schema,
+                stderr=stderr,
+                stdout=stdout,
+            ):
+                pass
+            partial_payload.clear()
+
         processed += 1
         if max_lines is not None and processed >= max_lines:
             break
