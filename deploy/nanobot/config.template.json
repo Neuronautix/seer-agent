@@ -1,0 +1,51 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "__WORKSPACE__",
+      "provider": "gemini",
+      "model": "__MODEL__",
+      "maxTokens": 2048,
+      "contextWindowTokens": 16384,
+      "temperature": 0.1,
+      "maxToolIterations": 8,
+      "timezone": "UTC"
+    }
+  },
+  "providers": {
+    "gemini": {
+      "apiKey": "__GEMINI_API_KEY__"
+    }
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": false
+    }
+  },
+  "channels": {
+    "sendProgress": false,
+    "sendToolHints": false
+  },
+  "tools": {
+    "restrictToWorkspace": true,
+    "exec": {
+      "enable": false
+    },
+    "mcpServers": {
+      "sensor": {
+        "type": "stdio",
+        "command": "__PYTHON__",
+        "args": [
+          "__MCP_SERVER__"
+        ],
+        "toolTimeout": 10,
+        "enabledTools": [
+          "get_latest_observation",
+          "get_metric",
+          "get_threshold_status"
+        ]
+      }
+    }
+  }
+}

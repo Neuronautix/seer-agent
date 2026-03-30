@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sovereign-sensor-agent.local/schemas/agent-action-v1.json",
+  "title": "AgentActionV1",
+  "description": "Constrained LLM intent contract. This schema never carries canonical sensor observations.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "intent", "subject"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "agent-action-v1"
+        },
+        "intent": {
+          "type": "string",
+          "const": "read_latest"
+        },
+        "subject": {
+          "type": "string",
+          "enum": ["temperature", "humidity", "pressure"]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "intent", "window"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "agent-action-v1"
+        },
+        "intent": {
+          "type": "string",
+          "const": "summarize_window"
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count"],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "subject": {
+              "type": "string",
+              "enum": ["temperature", "humidity", "pressure", "all"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "intent"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "agent-action-v1"
+        },
+        "intent": {
+          "type": "string",
+          "const": "get_threshold_status"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "intent", "proposal"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "agent-action-v1"
+        },
+        "intent": {
+          "type": "string",
+          "const": "request_export"
+        },
+        "proposal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proposalOnly", "target", "reason"],
+          "properties": {
+            "proposalOnly": {
+              "type": "boolean",
+              "const": true
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "notes": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "intent", "proposal"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "agent-action-v1"
+        },
+        "intent": {
+          "type": "string",
+          "const": "propose_annotation"
+        },
+        "proposal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proposalOnly", "reason", "annotation"],
+          "properties": {
+            "proposalOnly": {
+              "type": "boolean",
+              "const": true
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "annotation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "target": {
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        }
+      }
+    }
+  ]
+}

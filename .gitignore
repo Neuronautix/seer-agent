@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+.DS_Store
+.idea/
+
+# Runtime outputs
+logs/*.json
+logs/*.jsonl
+deploy/nanobot/runtime-config.json
+deploy/nanobot/nanobot.env
+deploy/nanobot/whatsapp-auth/
+deploy/nanobot/workspace/sessions/
+memory/
+cron/
+.nanobot/
+
+# Editor settings
+.vscode/

@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Sensor Agent Nanobot Gateway
+After=network.target sovereign-sensor-api.service
+Requires=sovereign-sensor-api.service
+
+[Service]
+Type=simple
+User=dhuzard
+WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
+ExecStart=/home/dhuzard/sovereign-sensor-agent/deploy/nanobot/start_nanobot.sh gateway
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

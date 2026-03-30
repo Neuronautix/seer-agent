@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sovereign-sensor-agent.local/schemas/sensor-observation-v1.json",
+  "title": "SensorObservationV1",
+  "description": "Canonical live observation contract for deterministic sensor ingestion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "@context",
+    "@type",
+    "schemaVersion",
+    "sensorId",
+    "sourcePort",
+    "observedAt",
+    "temperatureC",
+    "humidityPct",
+    "pressureHpa"
+  ],
+  "properties": {
+    "@context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "@vocab",
+        "schemaVersion",
+        "sensorId",
+        "sourcePort",
+        "observedAt",
+        "temperatureC",
+        "humidityPct",
+        "pressureHpa"
+      ],
+      "properties": {
+        "@vocab": {
+          "type": "string",
+          "const": "https://sovereign-sensor-agent.local/ontology#"
+        },
+        "schemaVersion": {
+          "type": "string",
+          "const": "https://sovereign-sensor-agent.local/ontology#schemaVersion"
+        },
+        "sensorId": {
+          "type": "string",
+          "const": "https://schema.org/identifier"
+        },
+        "sourcePort": {
+          "type": "string",
+          "const": "https://sovereign-sensor-agent.local/ontology#sourcePort"
+        },
+        "observedAt": {
+          "type": "string",
+          "const": "https://schema.org/observationDate"
+        },
+        "temperatureC": {
+          "type": "string",
+          "const": "https://sovereign-sensor-agent.local/ontology#temperatureC"
+        },
+        "humidityPct": {
+          "type": "string",
+          "const": "https://sovereign-sensor-agent.local/ontology#humidityPct"
+        },
+        "pressureHpa": {
+          "type": "string",
+          "const": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+        }
+      }
+    },
+    "@type": {
+      "type": "string",
+      "const": "SensorObservation"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "sensor-observation-v1"
+    },
+    "sensorId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "sourcePort": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
+    "temperatureC": {
+      "type": "number",
+      "minimum": -40,
+      "maximum": 85
+    },
+    "humidityPct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "pressureHpa": {
+      "type": "number",
+      "minimum": 300,
+      "maximum": 1100
+    }
+  }
+}
