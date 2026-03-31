@@ -7,6 +7,7 @@ DEPLOY_DIR="$ROOT_DIR/deploy/nanobot"
 WORKSPACE_DIR="$DEPLOY_DIR/workspace"
 CONFIG_PATH="$DEPLOY_DIR/runtime-config.json"
 ENV_FILE="$DEPLOY_DIR/nanobot.env"
+LOG_DIR="$ROOT_DIR/logs"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 NANOBOT_BIN="$ROOT_DIR/.venv/bin/nanobot"
 MCP_SERVER="$DEPLOY_DIR/mcp_server.py"
@@ -18,6 +19,84 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 mkdir -p "$WORKSPACE_DIR"
+
+BRIDGE_PID=""
+ALARM_DAEMON_PID=""
+GATEWAY_PID=""
+
+is_port_open() {
+  local host="$1"
+  local port="$2"
+  "$PYTHON_BIN" - "$host" "$port" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(0.5)
+    raise SystemExit(0 if sock.connect_ex((host, port)) == 0 else 1)
+PY
+}
+
+wait_for_port() {
+  local host="$1"
+  local port="$2"
+  local attempts="${3:-40}"
+
+  for ((i=0; i<attempts; i++)); do
+    if is_port_open "$host" "$port"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  return 1
+}
+
+start_bridge_background() {
+  mkdir -p "$LOG_DIR"
+  if is_port_open 127.0.0.1 3001; then
+    echo "WhatsApp bridge already running on ws://127.0.0.1:3001"
+    return 0
+  fi
+
+  "$PYTHON_BIN" "$DEPLOY_DIR/whatsapp_bridge.py" "$CONFIG_PATH" >"$LOG_DIR/whatsapp-bridge.log" 2>&1 &
+  BRIDGE_PID=$!
+
+  if ! wait_for_port 127.0.0.1 3001 60; then
+    echo "WhatsApp bridge failed to start. See $LOG_DIR/whatsapp-bridge.log" >&2
+    return 1
+  fi
+}
+
+start_alarm_daemon_background() {
+  mkdir -p "$LOG_DIR"
+  "$PYTHON_BIN" "$DEPLOY_DIR/whatsapp_alarm_daemon.py" "$CONFIG_PATH" >"$LOG_DIR/whatsapp-alarm-daemon.log" 2>&1 &
+  ALARM_DAEMON_PID=$!
+}
+
+stop_stack() {
+  local pids=()
+  [[ -n "$GATEWAY_PID" ]] && pids+=("$GATEWAY_PID")
+  [[ -n "$ALARM_DAEMON_PID" ]] && pids+=("$ALARM_DAEMON_PID")
+  [[ -n "$BRIDGE_PID" ]] && pids+=("$BRIDGE_PID")
+  if [[ ${#pids[@]} -gt 0 ]]; then
+    kill "${pids[@]}" 2>/dev/null || true
+    wait "${pids[@]}" 2>/dev/null || true
+  fi
+}
+
+run_whatsapp_stack() {
+  ensure_key
+  render_config
+  trap stop_stack EXIT INT TERM
+  start_bridge_background
+  start_alarm_daemon_background
+  "$NANOBOT_BIN" gateway --config "$CONFIG_PATH" --workspace "$WORKSPACE_DIR" "$@" &
+  GATEWAY_PID=$!
+  wait -n "$GATEWAY_PID" "$ALARM_DAEMON_PID" ${BRIDGE_PID:+"$BRIDGE_PID"}
+}
 
 validate_whatsapp_config() {
   if [[ "${NANOBOT_ENABLE_WHATSAPP:-false}" != "true" ]]; then
@@ -131,7 +210,9 @@ $(render_whatsapp_config)
         "enabledTools": [
           "get_latest_observation",
           "get_metric",
-          "get_threshold_status"
+          "get_threshold_status",
+          "get_alarm_status",
+          "summarize_window"
         ]
       }
     }
@@ -170,6 +251,9 @@ case "$COMMAND" in
     render_config
     exec "$PYTHON_BIN" "$DEPLOY_DIR/whatsapp_login.py" "$CONFIG_PATH" "$@"
     ;;
+  up|stack)
+    run_whatsapp_stack "$@"
+    ;;
   agent)
     ensure_key
     render_config
@@ -182,7 +266,7 @@ case "$COMMAND" in
     cat "$CONFIG_PATH"
     ;;
   *)
-    echo "Usage: $0 {render-config|gateway|whatsapp-bridge|whatsapp-login|agent|status} [nanobot args...]" >&2
+    echo "Usage: $0 {render-config|gateway|whatsapp-bridge|whatsapp-login|up|stack|agent|status} [nanobot args...]" >&2
     exit 2
     ;;
 esac

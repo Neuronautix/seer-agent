@@ -17,7 +17,13 @@ from pathlib import Path
 from build_observation import build_observation, normalize_timestamp
 from api_server import make_handler
 from ontology_guard import load_schema, validate_observation
-from read_serial import ingest_stream, parse_human_readable_sensor_field, parse_sensor_line, set_serial_baud_rate
+from read_serial import (
+    ingest_stream,
+    parse_human_readable_sensor_field,
+    parse_sensor_line,
+    set_serial_baud_rate,
+    split_human_readable_fragments,
+)
 
 
 class PipelineTests(unittest.TestCase):
@@ -47,6 +53,12 @@ class PipelineTests(unittest.TestCase):
             ("humidity_pct", 37.28),
         )
         self.assertIsNone(parse_human_readable_sensor_field("ignored text\n"))
+
+    def test_split_human_readable_fragments(self) -> None:
+        self.assertEqual(
+            split_human_readable_fragments("Temperature = 19.95 °CHumidity    = 37.28 %\r\n"),
+            ["Temperature = 19.95 °C", "Humidity    = 37.28 %"],
+        )
 
     def test_set_serial_baud_rate_falls_back_without_cfset_functions(self) -> None:
         attributes = [0, 0, 0, 0, 0, 0, []]
@@ -268,36 +280,64 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(latest["observedAt"].endswith("Z"))
             self.assertEqual(errors.getvalue(), "")
 
+    def test_ingest_stream_accepts_merged_human_readable_fragments(self) -> None:
+        output = io.StringIO()
+        errors = io.StringIO()
+        lines = [
+            "Temperature = 19.95 °CHumidity    = 37.28 %\r\n",
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            log_path = temp_path / "validated-observations.jsonl"
+            latest_path = temp_path / "latest-observation.json"
+            rejection_log_path = temp_path / "rejected-lines.jsonl"
+            ingest_stream(
+                lines,
+                device="/dev/ttyACM0",
+                sensor_id="arduino-ttyACM0",
+                log_path=log_path,
+                latest_path=latest_path,
+                rejection_log_path=rejection_log_path,
+                schema=self.schema,
+                stderr=errors,
+                stdout=output,
+            )
+
+            latest = json.loads(latest_path.read_text(encoding="utf-8"))
+            self.assertEqual(latest["temperatureC"], 19.95)
+            self.assertEqual(latest["humidityPct"], 37.28)
+            self.assertFalse(rejection_log_path.exists())
+            self.assertEqual(errors.getvalue(), "")
+
     def test_api_latest_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             latest_path = Path(temp_dir) / "latest-observation.json"
-            latest_path.write_text(
-                json.dumps(
-                    {
-                        "@context": {
-                            "@vocab": "https://sovereign-sensor-agent.local/ontology#",
-                            "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
-                            "sensorId": "https://schema.org/identifier",
-                            "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
-                            "observedAt": "https://schema.org/observationDate",
-                            "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
-                            "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
-                            "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
-                        },
-                        "@type": "SensorObservation",
-                        "schemaVersion": "sensor-observation-v1",
-                        "sensorId": "arduino-nano-33-ble-sense-rev2",
-                        "sourcePort": "/dev/ttyUSB0",
-                        "observedAt": "2026-03-29T15:30:00Z",
-                        "temperatureC": 23.4,
-                        "humidityPct": 51.2,
-                        "pressureHpa": 1008.7
-                    }
-                ),
-                encoding="utf-8",
-            )
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            observation = {
+                "@context": {
+                    "@vocab": "https://sovereign-sensor-agent.local/ontology#",
+                    "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
+                    "sensorId": "https://schema.org/identifier",
+                    "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
+                    "observedAt": "https://schema.org/observationDate",
+                    "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
+                    "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
+                    "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+                },
+                "@type": "SensorObservation",
+                "schemaVersion": "sensor-observation-v1",
+                "sensorId": "arduino-nano-33-ble-sense-rev2",
+                "sourcePort": "/dev/ttyUSB0",
+                "observedAt": "2026-03-29T15:30:00Z",
+                "temperatureC": 23.4,
+                "humidityPct": 51.2,
+                "pressureHpa": 1008.7
+            }
+            latest_path.write_text(json.dumps(observation), encoding="utf-8")
+            log_path.write_text(json.dumps(observation) + "\n", encoding="utf-8")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path, log_path))
             thread = Thread(target=server.serve_forever, daemon=True)
             thread.start()
             base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -311,6 +351,10 @@ class PipelineTests(unittest.TestCase):
                 threshold_status = json.loads(
                     urllib.request.urlopen(f"{base_url}/latest/threshold-status").read().decode("utf-8")
                 )
+                alarm_status = json.loads(
+                    urllib.request.urlopen(f"{base_url}/latest/alarm-status").read().decode("utf-8")
+                )
+                summary = json.loads(urllib.request.urlopen(f"{base_url}/summary?count=1&subject=all").read().decode("utf-8"))
 
                 self.assertTrue(root["ok"])
                 self.assertIn("/latest/temp", root["endpoints"])
@@ -319,6 +363,9 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(temp["value"], 23.4)
                 self.assertEqual(humidity["value"], 51.2)
                 self.assertEqual(threshold_status["thresholdStatus"]["pressure"]["status"], "normal")
+                self.assertFalse(alarm_status["hasActiveAlarms"])
+                self.assertEqual(summary["action"], "summarize_window")
+                self.assertEqual(summary["summary"]["temperature"]["average"], 23.4)
 
                 request = urllib.request.Request(f"{base_url}/latest", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as error:
@@ -340,32 +387,30 @@ class PipelineTests(unittest.TestCase):
     def test_api_pressure_endpoint_reports_unavailable_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             latest_path = Path(temp_dir) / "latest-observation.json"
-            latest_path.write_text(
-                json.dumps(
-                    {
-                        "@context": {
-                            "@vocab": "https://sovereign-sensor-agent.local/ontology#",
-                            "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
-                            "sensorId": "https://schema.org/identifier",
-                            "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
-                            "observedAt": "https://schema.org/observationDate",
-                            "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
-                            "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
-                            "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
-                        },
-                        "@type": "SensorObservation",
-                        "schemaVersion": "sensor-observation-v1",
-                        "sensorId": "arduino-ttyACM0",
-                        "sourcePort": "/dev/ttyACM0",
-                        "observedAt": "2026-03-30T11:42:23Z",
-                        "temperatureC": 19.76,
-                        "humidityPct": 37.52
-                    }
-                ),
-                encoding="utf-8",
-            )
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            observation = {
+                "@context": {
+                    "@vocab": "https://sovereign-sensor-agent.local/ontology#",
+                    "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
+                    "sensorId": "https://schema.org/identifier",
+                    "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
+                    "observedAt": "https://schema.org/observationDate",
+                    "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
+                    "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
+                    "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+                },
+                "@type": "SensorObservation",
+                "schemaVersion": "sensor-observation-v1",
+                "sensorId": "arduino-ttyACM0",
+                "sourcePort": "/dev/ttyACM0",
+                "observedAt": "2026-03-30T11:42:23Z",
+                "temperatureC": 19.76,
+                "humidityPct": 37.52
+            }
+            latest_path.write_text(json.dumps(observation), encoding="utf-8")
+            log_path.write_text(json.dumps(observation) + "\n", encoding="utf-8")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path, log_path))
             thread = Thread(target=server.serve_forever, daemon=True)
             thread.start()
             base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -390,33 +435,53 @@ class PipelineTests(unittest.TestCase):
     def test_webhook_returns_metric_reply_for_json_and_form_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             latest_path = Path(temp_dir) / "latest-observation.json"
-            latest_path.write_text(
-                json.dumps(
-                    {
-                        "@context": {
-                            "@vocab": "https://sovereign-sensor-agent.local/ontology#",
-                            "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
-                            "sensorId": "https://schema.org/identifier",
-                            "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
-                            "observedAt": "https://schema.org/observationDate",
-                            "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
-                            "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
-                            "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
-                        },
-                        "@type": "SensorObservation",
-                        "schemaVersion": "sensor-observation-v1",
-                        "sensorId": "arduino-nano-33-ble-sense-rev2",
-                        "sourcePort": "/dev/ttyUSB0",
-                        "observedAt": "2026-03-29T15:30:00Z",
-                        "temperatureC": 23.4,
-                        "humidityPct": 51.2,
-                        "pressureHpa": 1008.7
-                    }
-                ),
-                encoding="utf-8",
-            )
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            observations = [
+                {
+                    "@context": {
+                        "@vocab": "https://sovereign-sensor-agent.local/ontology#",
+                        "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
+                        "sensorId": "https://schema.org/identifier",
+                        "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
+                        "observedAt": "https://schema.org/observationDate",
+                        "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
+                        "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
+                        "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+                    },
+                    "@type": "SensorObservation",
+                    "schemaVersion": "sensor-observation-v1",
+                    "sensorId": "arduino-nano-33-ble-sense-rev2",
+                    "sourcePort": "/dev/ttyUSB0",
+                    "observedAt": "2026-03-29T15:29:00Z",
+                    "temperatureC": 22.4,
+                    "humidityPct": 50.2,
+                    "pressureHpa": 1008.1
+                },
+                {
+                    "@context": {
+                        "@vocab": "https://sovereign-sensor-agent.local/ontology#",
+                        "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
+                        "sensorId": "https://schema.org/identifier",
+                        "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
+                        "observedAt": "https://schema.org/observationDate",
+                        "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
+                        "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
+                        "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+                    },
+                    "@type": "SensorObservation",
+                    "schemaVersion": "sensor-observation-v1",
+                    "sensorId": "arduino-nano-33-ble-sense-rev2",
+                    "sourcePort": "/dev/ttyUSB0",
+                    "observedAt": "2026-03-29T15:30:00Z",
+                    "temperatureC": 23.4,
+                    "humidityPct": 51.2,
+                    "pressureHpa": 1008.7
+                },
+            ]
+            latest_path.write_text(json.dumps(observations[-1]), encoding="utf-8")
+            log_path.write_text("\n".join(json.dumps(item) for item in observations) + "\n", encoding="utf-8")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path, log_path))
             thread = Thread(target=server.serve_forever, daemon=True)
             thread.start()
             base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -438,10 +503,87 @@ class PipelineTests(unittest.TestCase):
                 )
                 form_response = json.loads(urllib.request.urlopen(form_request).read().decode("utf-8"))
 
+                summary_request = urllib.request.Request(
+                    f"{base_url}/webhook",
+                    data=json.dumps({"text": "summary last 2 temperature"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                summary_response = json.loads(urllib.request.urlopen(summary_request).read().decode("utf-8"))
+
+                alarm_request = urllib.request.Request(
+                    f"{base_url}/webhook",
+                    data=json.dumps({"text": "any alarm right now?"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                alarm_response = json.loads(urllib.request.urlopen(alarm_request).read().decode("utf-8"))
+
                 self.assertEqual(json_response["action"], "read_latest")
                 self.assertIn("1008.7", json_response["reply"])
                 self.assertEqual(form_response["action"], "read_latest")
                 self.assertIn("23.4", form_response["reply"])
+                self.assertEqual(summary_response["action"], "summarize_window")
+                self.assertEqual(summary_response["data"]["window"]["actualCount"], 2)
+                self.assertEqual(alarm_response["action"], "get_alarm_status")
+                self.assertFalse(alarm_response["data"]["hasActiveAlarms"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_webhook_admin_command_updates_temperature_thresholds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            config_path = Path(temp_dir) / "threshold-config.json"
+            observation = {
+                "@context": {
+                    "@vocab": "https://sovereign-sensor-agent.local/ontology#",
+                    "schemaVersion": "https://sovereign-sensor-agent.local/ontology#schemaVersion",
+                    "sensorId": "https://schema.org/identifier",
+                    "sourcePort": "https://sovereign-sensor-agent.local/ontology#sourcePort",
+                    "observedAt": "https://schema.org/observationDate",
+                    "temperatureC": "https://sovereign-sensor-agent.local/ontology#temperatureC",
+                    "humidityPct": "https://sovereign-sensor-agent.local/ontology#humidityPct",
+                    "pressureHpa": "https://sovereign-sensor-agent.local/ontology#pressureHpa"
+                },
+                "@type": "SensorObservation",
+                "schemaVersion": "sensor-observation-v1",
+                "sensorId": "arduino-ttyACM0",
+                "sourcePort": "/dev/ttyACM0",
+                "observedAt": "2026-03-31T12:00:00Z",
+                "temperatureC": 29.0,
+                "humidityPct": 37.52,
+                "pressureHpa": 1007.2
+            }
+            latest_path.write_text(json.dumps(observation), encoding="utf-8")
+            log_path.write_text(json.dumps(observation) + "\n", encoding="utf-8")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(latest_path, log_path, config_path))
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+
+            try:
+                update_request = urllib.request.Request(
+                    f"{base_url}/webhook",
+                    data=json.dumps({"text": "8888 set temp 30"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                update_response = json.loads(urllib.request.urlopen(update_request).read().decode("utf-8"))
+                config_response = json.loads(
+                    urllib.request.urlopen(f"{base_url}/config/thresholds").read().decode("utf-8")
+                )
+                threshold_status = json.loads(
+                    urllib.request.urlopen(f"{base_url}/latest/threshold-status").read().decode("utf-8")
+                )
+
+                self.assertEqual(update_response["action"], "update_thresholds")
+                self.assertIn("30.0 C", update_response["reply"])
+                self.assertEqual(config_response["thresholds"]["temperature"]["warningMax"], 30.0)
+                self.assertEqual(threshold_status["thresholdStatus"]["temperature"]["status"], "normal")
             finally:
                 server.shutdown()
                 server.server_close()

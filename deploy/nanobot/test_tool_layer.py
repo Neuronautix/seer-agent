@@ -13,7 +13,13 @@ from mcp.client.stdio import stdio_client
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PYTHON_BIN = ROOT_DIR / ".venv" / "bin" / "python"
 MCP_SERVER = ROOT_DIR / "deploy" / "nanobot" / "mcp_server.py"
-EXPECTED_TOOLS = {"get_latest_observation", "get_metric", "get_threshold_status"}
+EXPECTED_TOOLS = {
+    "get_latest_observation",
+    "get_metric",
+    "get_threshold_status",
+    "get_alarm_status",
+    "summarize_window",
+}
 
 
 def flatten_text(result) -> str:
@@ -68,6 +74,18 @@ async def main() -> int:
                 print(json.dumps({"ok": False, "error": "threshold status tool returned failure"}))
                 return 1
 
+            alarm_result = await session.call_tool("get_alarm_status", arguments={})
+            alarm_payload = json.loads(flatten_text(alarm_result))
+            if not alarm_payload.get("ok"):
+                print(json.dumps({"ok": False, "error": "alarm status tool returned failure"}))
+                return 1
+
+            summary_result = await session.call_tool("summarize_window", arguments={"count": 3, "subject": "all"})
+            summary_payload = json.loads(flatten_text(summary_result))
+            if not summary_payload.get("ok"):
+                print(json.dumps({"ok": False, "error": "summary tool returned failure"}))
+                return 1
+
             statuses = threshold_payload.get("thresholdStatus", {})
             for metric_name in ("temperature", "humidity", "pressure"):
                 if metric_name not in statuses:
@@ -81,6 +99,8 @@ async def main() -> int:
                 "tools": sorted(EXPECTED_TOOLS),
                 "metrics": metrics,
                 "thresholdMetrics": sorted(statuses),
+                "overallStatus": alarm_payload.get("overallStatus"),
+                "summaryWindow": summary_payload.get("window", {}).get("actualCount"),
                 "source": "validated local files via workspace/tools wrappers",
             },
             separators=(",", ":"),

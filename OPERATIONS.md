@@ -39,6 +39,7 @@ Edit `deploy/nanobot/nanobot.env` and set `GEMINI_API_KEY`.
 
 Use a plain Gemini model name such as `gemini-2.5-flash`.
 Do not prefix it with `gemini/` in `NANOBOT_MODEL`.
+Set `SSA_ADMIN_PASSWORD=8888` and `SSA_WHATSAPP_ALERT_TO` for the direct chat that should receive temperature alarm messages.
 
 ### 4. Start Nanobot locally
 
@@ -52,6 +53,12 @@ Gateway mode:
 
 ```bash
 ./deploy/nanobot/start_nanobot.sh gateway
+```
+
+Full WhatsApp stack mode:
+
+```bash
+./deploy/nanobot/start_nanobot.sh up
 ```
 
 ## Local WhatsApp Link Setup
@@ -76,6 +83,8 @@ NANOBOT_WHATSAPP_SELF_CHAT_ONLY=false
 NANOBOT_WHATSAPP_GROUP_POLICY=mention
 NANOBOT_WHATSAPP_BRIDGE_URL=ws://localhost:3001
 NANOBOT_WHATSAPP_BRIDGE_TOKEN=
+SSA_ADMIN_PASSWORD=8888
+SSA_WHATSAPP_ALERT_TO=REPLACE_WITH_YOUR_WHATSAPP_ID
 ```
 
 Notes:
@@ -87,6 +96,8 @@ Notes:
 - `NANOBOT_WHATSAPP_GROUP_POLICY=mention` keeps group chats quiet unless the linked account is explicitly mentioned.
 - The startup script now refuses `NANOBOT_WHATSAPP_ALLOW_FROM=*` unless you explicitly set `NANOBOT_WHATSAPP_ALLOW_ALL=true`.
 - Keep WhatsApp disabled until Node.js is installed.
+- `SSA_ADMIN_PASSWORD` controls the deterministic threshold-update command path and defaults to `8888`.
+- `SSA_WHATSAPP_ALERT_TO` is the chat that receives outbound temperature alarm messages.
 
 ### Install the bridge prerequisite
 
@@ -113,6 +124,31 @@ After the account is linked, start this only if the login process is no longer r
 ```
 
 The Nanobot gateway connects to this local WebSocket bridge at `ws://127.0.0.1:3001`.
+
+### Start the full WhatsApp stack with one command
+
+After the account is linked:
+
+```bash
+./scripts/ssa install
+ssa up
+```
+
+That starts the bridge, the deterministic WhatsApp admin-and-alert daemon, and the Nanobot gateway through `sovereign-sensor-nanobot.service`.
+
+### WhatsApp admin commands
+
+Send one of these messages from an allowed chat:
+
+- `8888 thresholds`
+- `8888 set temp 30`
+- `8888 set temp critical 35`
+
+These commands write `threshold-config.json`, which is then read by the API and local tools.
+
+### Automatic temperature alarm messages
+
+When temperature enters a warning or critical state, the WhatsApp daemon sends an outbound message to `SSA_WHATSAPP_ALERT_TO`.
 
 ### Start the Nanobot gateway with WhatsApp enabled
 

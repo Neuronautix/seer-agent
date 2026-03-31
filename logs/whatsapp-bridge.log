@@ -1,0 +1,22 @@
+
+> nanobot-whatsapp-bridge@0.1.0 start
+> node dist/index.js
+
+🐈 nanobot WhatsApp Bridge
+========================
+
+🌉 Bridge server listening on ws://127.0.0.1:3001
+Using Baileys version: 2.3000.1035194821
+✅ Connected to WhatsApp
+🔗 Python client connected
+🔗 Python client connected
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"33608952225-1570598627@g.us","fromMe":false,"participant":"182463229886627@lid","id":"3AC57D330B11BE3E1A26","ts":1774939488,"pushName":"Fabien 🐙🤿🎾🏂","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363029419898625@g.us","fromMe":false,"participant":"85418477359169@lid","id":"AC5FF68F59EA3FFA2C40A174712C1CF9","ts":1774939763,"pushName":"Sarah","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363304088647241@g.us","fromMe":false,"participant":"256379516408007@lid","id":"3A627AAE903CEB6EC950","ts":1774940143,"pushName":"Llorens","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363304088647241@g.us","fromMe":false,"participant":"256379516408007@lid","id":"3A0EC62CE6AFA793D02D","ts":1774940143,"pushName":"Llorens","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363304088647241@g.us","fromMe":false,"participant":"256379516408007@lid","id":"3A86D46716AD839D7034","ts":1774940144,"pushName":"Llorens","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"33608952225-1570598627@g.us","fromMe":false,"participant":"258849156157460@lid","id":"3AE2AE86EB9E037EFC26","ts":1774940157,"pushName":"Sandrine Ruffel","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"33608952225-1570598627@g.us","fromMe":false,"participant":"263719716126773@lid","id":"3A89809539B1EE63E02B","ts":1774940169,"pushName":"Thibaud Laplanche","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363304088647241@g.us","fromMe":false,"participant":"37430723899634@lid","id":"3EB0E001B104A8A44A0337","ts":1774940835,"pushName":"Erica Fongaro","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363304088647241@g.us","fromMe":false,"participant":"37430723899634@lid","id":"3EB001D83C656D55759DE8","ts":1774940845,"pushName":"Erica Fongaro","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"120363304088647241@g.us","fromMe":true,"participant":"170639184896160@lid","id":"ACB029F3A709D24D8704D09F246D7087","ts":1774941381,"pushName":"Damien HUZARD","selfIds":["33785306470","170639184896160"]}

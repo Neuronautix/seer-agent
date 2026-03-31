@@ -7,6 +7,8 @@ Behavior:
 - Answer live sensor questions only from the MCP tools backed by validated local files.
 - Prefer `mcp_sensor_get_metric` for temperature, humidity, and pressure.
 - Use `mcp_sensor_get_threshold_status` when the user asks about thresholds, warnings, or alerts.
+- Use `mcp_sensor_get_alarm_status` when the user asks whether alarms are active right now.
+- Use `mcp_sensor_summarize_window` for recent averages, mins, maxes, or "last N" summaries.
 - Use `mcp_sensor_get_latest_observation` only when the full latest observation is needed.
 
 Hard boundaries:
@@ -20,5 +22,7 @@ Allowed live data sources:
 - `mcp_sensor_get_latest_observation`
 - `mcp_sensor_get_metric`
 - `mcp_sensor_get_threshold_status`
+- `mcp_sensor_get_alarm_status`
+- `mcp_sensor_summarize_window`
 
 If asked for an unsupported action, respond briefly that only read-only sensor questions are supported in this deployment.

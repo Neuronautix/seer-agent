@@ -33,10 +33,11 @@ BAUD_RATES = {
 }
 
 HUMAN_READABLE_FIELD_PATTERNS = {
-    "temperature_c": re.compile(r"^Temperature\s*=\s*([-+]?\d+(?:\.\d+)?)\s*(?:°?C)?\s*$", re.IGNORECASE),
-    "humidity_pct": re.compile(r"^Humidity\s*=\s*([-+]?\d+(?:\.\d+)?)\s*%?\s*$", re.IGNORECASE),
-    "pressure_hpa": re.compile(r"^Pressure\s*=\s*([-+]?\d+(?:\.\d+)?)\s*(?:hPa)?\s*$", re.IGNORECASE),
+    "temperature_c": re.compile(r"^Temperature\s*=\s*([-+]?\d+(?:\.\d+)?)\s*(?:°\s*C|°C|C)\s*$", re.IGNORECASE),
+    "humidity_pct": re.compile(r"^Humidity\s*=\s*([-+]?\d+(?:\.\d+)?)\s*%\s*$", re.IGNORECASE),
+    "pressure_hpa": re.compile(r"^Pressure\s*=\s*([-+]?\d+(?:\.\d+)?)\s*hPa\s*$", re.IGNORECASE),
 }
+HUMAN_READABLE_FIELD_START = re.compile(r"(?i)(temperature|humidity|pressure)\s*=")
 
 
 def set_serial_baud_rate(attributes: list[Any], baud_rate: int) -> None:
@@ -105,6 +106,21 @@ def parse_human_readable_sensor_field(line: str) -> tuple[str, float] | None:
             return field_name, float(match.group(1))
 
     return None
+
+
+def split_human_readable_fragments(raw_line: str) -> list[str]:
+    matches = list(HUMAN_READABLE_FIELD_START.finditer(raw_line))
+    if not matches:
+        return [raw_line]
+
+    fragments: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_line)
+        fragment = raw_line[start:end].strip()
+        if fragment:
+            fragments.append(fragment)
+    return fragments or [raw_line]
 
 
 def append_jsonl(log_path: Path, observation: dict[str, Any]) -> None:
@@ -212,6 +228,51 @@ def process_payload(
     return True
 
 
+def finalize_partial_payload(
+    partial_payload: dict[str, Any],
+    *,
+    device: str,
+    sensor_id: str,
+    log_path: Path,
+    latest_path: Path,
+    rejection_log_path: Path | None,
+    schema: dict[str, Any],
+    stderr: TextIO,
+    stdout: TextIO | None = None,
+    reject_incomplete: bool,
+    raw_line: str,
+) -> bool:
+    if "temperature_c" in partial_payload and "humidity_pct" in partial_payload:
+        payload = dict(partial_payload)
+        payload.setdefault(
+            "timestamp",
+            datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+        partial_payload.clear()
+        return process_payload(
+            payload,
+            device=device,
+            sensor_id=sensor_id,
+            log_path=log_path,
+            latest_path=latest_path,
+            rejection_log_path=rejection_log_path,
+            schema=schema,
+            stderr=stderr,
+            stdout=stdout,
+        )
+
+    if partial_payload and reject_incomplete:
+        log_rejected_line(
+            raw_line=raw_line,
+            error="incomplete human-readable sensor block",
+            device=device,
+            stderr=stderr,
+            rejection_log_path=rejection_log_path,
+        )
+        partial_payload.clear()
+    return False
+
+
 def ingest_stream(
     stream: Iterable[str],
     *,
@@ -232,19 +293,69 @@ def ingest_stream(
         try:
             payload = parse_sensor_line(raw_line)
         except ValueError:
-            parsed_field = parse_human_readable_sensor_field(raw_line)
             stripped = raw_line.strip()
+            if not stripped:
+                finalize_partial_payload(
+                    partial_payload,
+                    device=device,
+                    sensor_id=sensor_id,
+                    log_path=log_path,
+                    latest_path=latest_path,
+                    rejection_log_path=rejection_log_path,
+                    schema=schema,
+                    stderr=stderr,
+                    stdout=stdout,
+                    reject_incomplete=True,
+                    raw_line=raw_line,
+                )
+            else:
+                fragments = split_human_readable_fragments(raw_line)
+                parsed_fields: list[str] = []
+                saw_human_readable_marker = False
 
-            if parsed_field is not None:
-                field_name, value = parsed_field
-                partial_payload[field_name] = value
-            elif not stripped:
-                if "temperature_c" in partial_payload and "humidity_pct" in partial_payload:
-                    partial_payload["timestamp"] = datetime.now(tz=UTC).isoformat(timespec="seconds").replace(
-                        "+00:00", "Z"
-                    )
-                    if process_payload(
-                        dict(partial_payload),
+                for fragment in fragments:
+                    parsed_field = parse_human_readable_sensor_field(fragment)
+                    if parsed_field is not None:
+                        field_name, value = parsed_field
+                        if field_name == "temperature_c" and "temperature_c" in partial_payload and "humidity_pct" in partial_payload:
+                            finalize_partial_payload(
+                                partial_payload,
+                                device=device,
+                                sensor_id=sensor_id,
+                                log_path=log_path,
+                                latest_path=latest_path,
+                                rejection_log_path=rejection_log_path,
+                                schema=schema,
+                                stderr=stderr,
+                                stdout=stdout,
+                                reject_incomplete=False,
+                                raw_line=fragment,
+                            )
+                        partial_payload[field_name] = value
+                        parsed_fields.append(field_name)
+                        continue
+
+                    if HUMAN_READABLE_FIELD_START.search(fragment):
+                        saw_human_readable_marker = True
+
+                if parsed_fields:
+                    if any(field_name in parsed_fields for field_name in ("humidity_pct", "pressure_hpa")):
+                        finalize_partial_payload(
+                            partial_payload,
+                            device=device,
+                            sensor_id=sensor_id,
+                            log_path=log_path,
+                            latest_path=latest_path,
+                            rejection_log_path=rejection_log_path,
+                            schema=schema,
+                            stderr=stderr,
+                            stdout=stdout,
+                            reject_incomplete=False,
+                            raw_line=raw_line,
+                        )
+                elif not saw_human_readable_marker:
+                    finalize_partial_payload(
+                        partial_payload,
                         device=device,
                         sensor_id=sensor_id,
                         log_path=log_path,
@@ -253,27 +364,32 @@ def ingest_stream(
                         schema=schema,
                         stderr=stderr,
                         stdout=stdout,
-                    ):
-                        pass
-                    partial_payload.clear()
-                elif partial_payload:
+                        reject_incomplete=False,
+                        raw_line=raw_line,
+                    )
+                    if partial_payload:
+                        partial_payload.clear()
                     log_rejected_line(
                         raw_line=raw_line,
-                        error="incomplete human-readable sensor block",
+                        error="missing fields: HUM, PRESS, TEMP, TS",
                         device=device,
                         stderr=stderr,
                         rejection_log_path=rejection_log_path,
                     )
-                    partial_payload.clear()
-            else:
-                log_rejected_line(
-                    raw_line=raw_line,
-                    error="missing fields: HUM, PRESS, TEMP, TS",
-                    device=device,
-                    stderr=stderr,
-                    rejection_log_path=rejection_log_path,
-                )
         else:
+            finalize_partial_payload(
+                partial_payload,
+                device=device,
+                sensor_id=sensor_id,
+                log_path=log_path,
+                latest_path=latest_path,
+                rejection_log_path=rejection_log_path,
+                schema=schema,
+                stderr=stderr,
+                stdout=stdout,
+                reject_incomplete=False,
+                raw_line=raw_line,
+            )
             if process_payload(
                 payload,
                 device=device,
@@ -286,11 +402,24 @@ def ingest_stream(
                 stdout=stdout,
             ):
                 pass
-            partial_payload.clear()
 
         processed += 1
         if max_lines is not None and processed >= max_lines:
             break
+
+    finalize_partial_payload(
+        partial_payload,
+        device=device,
+        sensor_id=sensor_id,
+        log_path=log_path,
+        latest_path=latest_path,
+        rejection_log_path=rejection_log_path,
+        schema=schema,
+        stderr=stderr,
+        stdout=stdout,
+        reject_incomplete=True,
+        raw_line="",
+    )
     return processed
 
 
@@ -311,7 +440,7 @@ def open_serial_stream(device: str, baud_rate: int) -> TextIO:
         os.fdopen(descriptor, "rb", buffering=0),
         encoding="utf-8",
         errors="replace",
-        newline="\n",
+        newline=None,
         line_buffering=True,
     )
 

@@ -7,6 +7,10 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
+DEFAULT_CONFIG_PATH = ROOT_DIR / "threshold-config.json"
+
 DEFAULT_THRESHOLDS: dict[str, dict[str, float | str]] = {
     "temperature": {
         "metric": "temperatureC",
@@ -36,10 +40,11 @@ SEVERITY_RANK = {"unavailable": 0, "normal": 1, "warning": 2, "critical": 3}
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
     config = {"thresholds": json.loads(json.dumps(DEFAULT_THRESHOLDS))}
-    if config_path is None:
+    resolved_path = config_path if config_path is not None else DEFAULT_CONFIG_PATH
+    if not resolved_path.exists():
         return config
 
-    loaded = json.loads(config_path.read_text(encoding="utf-8"))
+    loaded = json.loads(resolved_path.read_text(encoding="utf-8"))
     thresholds = loaded.get("thresholds")
     if isinstance(thresholds, dict):
         for metric_name, metric_config in thresholds.items():

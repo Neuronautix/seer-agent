@@ -1,5 +1,5 @@
 [Unit]
-Description=Sovereign Sensor Agent Nanobot Gateway
+Description=Sovereign Sensor Agent WhatsApp Stack
 Wants=network-online.target
 After=network-online.target sovereign-sensor-api.service
 Requires=sovereign-sensor-api.service
@@ -8,7 +8,7 @@ Requires=sovereign-sensor-api.service
 Type=simple
 User=dhuzard
 WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
-ExecStart=/home/dhuzard/sovereign-sensor-agent/deploy/nanobot/start_nanobot.sh gateway
+ExecStart=/home/dhuzard/sovereign-sensor-agent/deploy/nanobot/start_nanobot.sh up
 Restart=always
 RestartSec=3
 

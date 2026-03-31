@@ -184,6 +184,48 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(response["thresholdStatus"]["pressure"]["status"], "unavailable")
             self.assertFalse(response["thresholdStatus"]["pressure"]["available"])
 
+    def test_get_alarm_status_returns_active_alarms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            write_jsonl(log_path, [self.make_observation(temperature=36.2, humidity=86.0, pressure=970.0)])
+
+            response = execute_action(
+                "get_alarm_status",
+                None,
+                log_path=log_path,
+                config=load_config(),
+            )
+
+            self.assertTrue(response["ok"])
+            self.assertTrue(response["hasActiveAlarms"])
+            self.assertEqual(response["overallStatus"], "critical")
+            self.assertEqual(response["activeAlarms"][0]["metric"], "temperature")
+
+    def test_summarize_window_returns_recent_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            write_jsonl(
+                log_path,
+                [
+                    self.make_observation(temperature=20.0, humidity=40.0, pressure=1001.0, observed_at="2026-03-29T10:00:00Z"),
+                    self.make_observation(temperature=22.0, humidity=42.0, pressure=1002.0, observed_at="2026-03-29T10:05:00Z"),
+                    self.make_observation(temperature=24.0, humidity=44.0, pressure=1003.0, observed_at="2026-03-29T10:10:00Z"),
+                ],
+            )
+
+            response = execute_action(
+                "summarize_window",
+                "temperature",
+                log_path=log_path,
+                config=load_config(),
+                count=2,
+            )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["window"]["actualCount"], 2)
+            self.assertEqual(response["summary"]["temperature"]["average"], 23.0)
+            self.assertEqual(response["summary"]["temperature"]["latest"], 24.0)
+
     def test_read_latest_pressure_fails_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "validated-observations.jsonl"

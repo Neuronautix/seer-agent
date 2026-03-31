@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STACK_SERVICE="sovereign-sensor-nanobot.service"
+
+usage() {
+  echo "Usage: ssa {install|up|down|restart|status|login|bridge|gateway}" >&2
+}
+
+COMMAND="${1:-help}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "$COMMAND" in
+  install)
+    target="${1:-/usr/local/bin/ssa}"
+    sudo ln -sf "$ROOT_DIR/scripts/ssa" "$target"
+    sudo chmod +x "$ROOT_DIR/scripts/ssa"
+    echo "Installed $target -> $ROOT_DIR/scripts/ssa"
+    ;;
+  up|start)
+    exec sudo systemctl start "$STACK_SERVICE"
+    ;;
+  down|stop)
+    exec sudo systemctl stop "$STACK_SERVICE"
+    ;;
+  restart)
+    exec sudo systemctl restart "$STACK_SERVICE"
+    ;;
+  status)
+    exec sudo systemctl --no-pager --full status sovereign-sensor-ingest.service sovereign-sensor-api.service "$STACK_SERVICE"
+    ;;
+  login|link)
+    exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-login "$@"
+    ;;
+  bridge)
+    exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-bridge "$@"
+    ;;
+  gateway)
+    exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" gateway "$@"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

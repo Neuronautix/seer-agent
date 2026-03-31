@@ -82,6 +82,9 @@ The high-level data flow is:
 - `scripts/supervisor.py`
   Deterministic read-only command handler for latest values and threshold status.
 
+- `threshold-config.json`
+  Persistent threshold state used by the API, supervisor, and WhatsApp admin command path when present.
+
 - `workspace/tools/get_latest_observation.py`
   Returns the latest validated observation.
 
@@ -359,6 +362,10 @@ Returns the latest validated pressure when the sensor provides it. If pressure i
 
 Returns threshold evaluations for temperature, humidity, and pressure. Missing metrics are reported as `unavailable` instead of failing the whole response.
 
+### `GET /config/thresholds`
+
+Returns the currently active threshold configuration, including any password-protected updates that were saved from WhatsApp or the webhook.
+
 ### `POST /webhook`
 
 Minimal local chat endpoint intended for provider integration.
@@ -388,6 +395,28 @@ Typical supported questions:
 - humidity
 - pressure, when the sensor provides it
 - threshold status
+
+Administrative threshold commands are also supported through the same webhook path. These commands are deterministic and do not go through the LLM layer.
+
+Examples:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/webhook \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"8888 thresholds"}'
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/webhook \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"8888 set temp 30"}'
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/webhook \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"8888 set temp critical 35"}'
+```
 
 ## Logs and Data Files
 
@@ -495,9 +524,9 @@ sudo systemctl start sovereign-sensor-api.service
 Recommended default boot profile:
 
 - Keep ingest and API enabled at boot.
-- Keep Nanobot manual, so WhatsApp only comes online when you explicitly start it.
+- Keep the WhatsApp stack manual, so it only comes online when you explicitly start it.
 
-Start Nanobot manually when needed:
+Start the WhatsApp stack manually when needed:
 
 ```bash
 sudo systemctl start sovereign-sensor-nanobot.service
@@ -576,6 +605,8 @@ NANOBOT_WHATSAPP_SELF_CHAT_ONLY=false
 NANOBOT_WHATSAPP_GROUP_POLICY=mention
 NANOBOT_WHATSAPP_BRIDGE_URL=ws://localhost:3001
 NANOBOT_WHATSAPP_BRIDGE_TOKEN=
+SSA_ADMIN_PASSWORD=8888
+SSA_WHATSAPP_ALERT_TO=REPLACE_WITH_YOUR_WHATSAPP_ID
 ```
 
 Guidance:
@@ -584,6 +615,8 @@ Guidance:
 - Use the phone number or LID shown in gateway logs for the allowed contact.
 - Set `NANOBOT_WHATSAPP_ALLOW_SELF_MESSAGES=true` if you want to test through the linked account's self-chat.
 - Set `NANOBOT_WHATSAPP_SELF_CHAT_ONLY=true` if you want to deny all other chats during testing.
+- `SSA_ADMIN_PASSWORD` defaults to `8888`; keep it set explicitly in the env file so the command path is obvious.
+- `SSA_WHATSAPP_ALERT_TO` is the direct chat that receives automatic temperature alarm messages. It can match `NANOBOT_WHATSAPP_ALLOW_FROM`.
 
 ### 3. Verify the read-only tool layer before linking WhatsApp
 
@@ -603,7 +636,24 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 Scan the QR code for WhatsApp Web. If you leave that process running after login, it already acts as the active bridge process.
 
-### 5. Start the bridge if the login process is no longer running
+### 5. Install the short Raspberry Pi command
+
+```bash
+cd /home/dhuzard/sovereign-sensor-agent
+./scripts/ssa install
+```
+
+That installs `/usr/local/bin/ssa` as a wrapper around the local deployment scripts and systemd service.
+
+### 6. Start the WhatsApp stack with one command
+
+```bash
+ssa up
+```
+
+That service now brings up the WhatsApp bridge, the deterministic admin-and-alert daemon, and the Nanobot gateway together.
+
+### 7. Start the bridge manually only if you are troubleshooting
 
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
@@ -612,7 +662,21 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 The bridge listens locally on `ws://127.0.0.1:3001`.
 
-### 6. Start the Nanobot gateway
+### 8. Administrative WhatsApp commands
+
+Send one of these messages from an allowed WhatsApp chat:
+
+- `8888 thresholds`
+- `8888 set temp 30`
+- `8888 set temp critical 35`
+
+Those commands update `threshold-config.json` directly. They do not go through the model.
+
+### 9. Automatic temperature alarm messages
+
+When temperature crosses into the configured warning or critical state, the WhatsApp daemon sends an outbound message to `SSA_WHATSAPP_ALERT_TO`.
+
+### 10. Start the Nanobot gateway manually if you do not want the systemd wrapper
 
 In another terminal:
 
@@ -621,7 +685,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh gateway
 ```
 
-### 7. Test end to end
+### 11. Test end to end
 
 Send a WhatsApp message from an allowed sender such as:
 

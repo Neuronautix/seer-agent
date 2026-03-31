@@ -49,5 +49,20 @@ def get_threshold_status() -> str:
     return run_tool("get_threshold_status.py")
 
 
+@SERVER.tool()
+def get_alarm_status() -> str:
+    return run_tool("get_alarm_status.py")
+
+
+@SERVER.tool()
+def summarize_window(count: int = 10, subject: str = "all") -> str:
+    normalized_subject = subject.strip().lower()
+    if normalized_subject not in {"all", "temperature", "humidity", "pressure"}:
+        raise ValueError("subject must be all, temperature, humidity, or pressure")
+    if count < 1:
+        raise ValueError("count must be at least 1")
+    return run_tool("summarize_window.py", "--count", str(count), "--subject", normalized_subject)
+
+
 if __name__ == "__main__":
     SERVER.run(transport="stdio")

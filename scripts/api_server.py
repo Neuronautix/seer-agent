@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from observation_analysis import evaluate_thresholds, read_recent_observations, summarize_window
+from alarm_runtime import handle_admin_message
+from observation_analysis import evaluate_thresholds, load_config, read_recent_observations, summarize_window
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LATEST_PATH = SCRIPT_DIR.parent / "logs" / "latest-observation.json"
@@ -76,10 +77,19 @@ def build_metric_payload(observation: dict[str, Any], metric_name: str, field_na
     }
 
 
-def build_threshold_payload(observation: dict[str, Any]) -> dict[str, Any]:
-    evaluation = evaluate_thresholds(observation, {"thresholds": {}})
+def build_config_payload(config_path: Path | None) -> dict[str, Any]:
     return {
         "ok": True,
+        "action": "get_threshold_config",
+        **load_config(config_path),
+    }
+
+
+def build_threshold_payload(observation: dict[str, Any], config_path: Path | None) -> dict[str, Any]:
+    evaluation = evaluate_thresholds(observation, load_config(config_path))
+    return {
+        "ok": True,
+        "action": "get_threshold_status",
         "observedAt": observation.get("observedAt"),
         "sensorId": observation.get("sensorId"),
         "sourcePort": observation.get("sourcePort"),
@@ -88,9 +98,25 @@ def build_threshold_payload(observation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_summary_payload(log_path: Path, count: int, subject: str) -> dict[str, Any]:
+def build_alarm_payload(observation: dict[str, Any], config_path: Path | None) -> dict[str, Any]:
+    evaluation = evaluate_thresholds(observation, load_config(config_path))
+    return {
+        "ok": True,
+        "action": "get_alarm_status",
+        "observedAt": observation.get("observedAt"),
+        "sensorId": observation.get("sensorId"),
+        "sourcePort": observation.get("sourcePort"),
+        "schemaVersion": observation.get("schemaVersion"),
+        "overallStatus": evaluation["overallStatus"],
+        "hasActiveAlarms": evaluation["hasActiveAlarms"],
+        "activeAlarms": evaluation["activeAlarms"],
+        "thresholdStatus": evaluation["thresholdStatus"],
+    }
+
+
+def build_summary_payload(log_path: Path, count: int, subject: str, config_path: Path | None) -> dict[str, Any]:
     observations = read_recent_observations(log_path, count=count)
-    payload = summarize_window(observations, {"thresholds": {}}, requested_count=count, subject=subject)
+    payload = summarize_window(observations, load_config(config_path), requested_count=count, subject=subject)
     payload.update(
         {
             "sensorId": observations[-1].get("sensorId"),
@@ -141,11 +167,23 @@ def extract_message_text(body: bytes, content_type: str) -> str:
     raise ValueError("unsupported webhook content type")
 
 
-def build_chat_reply(message_text: str, observation: dict[str, Any]) -> dict[str, Any]:
+def build_chat_reply(message_text: str, observation: dict[str, Any], config_path: Path | None) -> dict[str, Any]:
     normalized = " ".join(message_text.lower().split())
 
-    if any(keyword in normalized for keyword in ("threshold", "status", "alert")):
-        payload = build_threshold_payload(observation)
+    if any(keyword in normalized for keyword in ("alarm", "alert", "critical", "warning")):
+        payload = build_alarm_payload(observation, config_path)
+        if payload["hasActiveAlarms"]:
+            alarms = "; ".join(
+                f"{alarm['metric']} {alarm['value']} {alarm['unit']} ({alarm['status']})"
+                for alarm in payload["activeAlarms"]
+            )
+            reply = f"Active alarms: {alarms}. Observed at {payload['observedAt']}."
+        else:
+            reply = f"No active alarms. Overall status is {payload['overallStatus']}. Observed at {payload['observedAt']}."
+        return {"ok": True, "reply": reply, "action": "get_alarm_status", "data": payload}
+
+    if any(keyword in normalized for keyword in ("threshold", "status")):
+        payload = build_threshold_payload(observation, config_path)
         parts = []
         for metric_name in ("temperature", "humidity", "pressure"):
             metric = payload["thresholdStatus"][metric_name]
@@ -205,7 +243,12 @@ def build_summary_reply(summary_payload: dict[str, Any], subject: str) -> str:
     )
 
 
-def route_request(path: str, latest_path: Path, log_path: Path) -> tuple[int, dict[str, Any]]:
+def route_request(
+    path: str,
+    latest_path: Path,
+    log_path: Path,
+    config_path: Path | None,
+) -> tuple[int, dict[str, Any]]:
     parsed = urlparse(path)
     if parsed.path == "/":
         return HTTPStatus.OK, build_root_payload(latest_path)
@@ -213,11 +256,14 @@ def route_request(path: str, latest_path: Path, log_path: Path) -> tuple[int, di
     if parsed.path == "/health":
         return HTTPStatus.OK, build_health_payload(latest_path)
 
+    if parsed.path == "/config/thresholds":
+        return HTTPStatus.OK, build_config_payload(config_path)
+
     if parsed.path == "/summary":
         params = parse_qs(parsed.query, keep_blank_values=False)
         count = int(params.get("count", ["10"])[0])
         subject = params.get("subject", ["all"])[0].strip().lower()
-        return HTTPStatus.OK, build_summary_payload(log_path, count=count, subject=subject)
+        return HTTPStatus.OK, build_summary_payload(log_path, count=count, subject=subject, config_path=config_path)
 
     observation = load_latest_observation(latest_path)
 
@@ -230,16 +276,26 @@ def route_request(path: str, latest_path: Path, log_path: Path) -> tuple[int, di
     if parsed.path == "/latest/pressure":
         return HTTPStatus.OK, build_metric_payload(observation, "pressure", "pressureHpa", "hPa")
     if parsed.path == "/latest/threshold-status":
-        return HTTPStatus.OK, build_threshold_payload(observation)
+        return HTTPStatus.OK, build_threshold_payload(observation, config_path)
     if parsed.path == "/latest/alarm-status":
-        return HTTPStatus.OK, build_threshold_payload(observation)
+        return HTTPStatus.OK, build_alarm_payload(observation, config_path)
 
     return HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"}
 
 
-def route_webhook(body: bytes, content_type: str, latest_path: Path, log_path: Path) -> tuple[int, dict[str, Any]]:
-    observation = load_latest_observation(latest_path)
+def route_webhook(
+    body: bytes,
+    content_type: str,
+    latest_path: Path,
+    log_path: Path,
+    config_path: Path | None,
+) -> tuple[int, dict[str, Any]]:
     message_text = extract_message_text(body, content_type)
+    admin_response = handle_admin_message(message_text, config_path=config_path)
+    if admin_response is not None:
+        return HTTPStatus.OK, admin_response
+
+    observation = load_latest_observation(latest_path)
     normalized = " ".join(message_text.lower().split())
     if any(keyword in normalized for keyword in ("summary", "average", "avg", "recent", "last")):
         params = parse_qs("")
@@ -254,21 +310,27 @@ def route_webhook(body: bytes, content_type: str, latest_path: Path, log_path: P
             if metric_name in normalized:
                 subject = metric_name
                 break
-        summary_payload = build_summary_payload(log_path, count=count, subject=subject)
+        summary_payload = build_summary_payload(log_path, count=count, subject=subject, config_path=config_path)
         return HTTPStatus.OK, {
             "ok": True,
             "reply": build_summary_reply(summary_payload, subject),
             "action": "summarize_window",
             "data": summary_payload,
         }
-    return HTTPStatus.OK, build_chat_reply(message_text, observation)
+    return HTTPStatus.OK, build_chat_reply(message_text, observation, config_path)
 
 
-def make_handler(latest_path: Path, log_path: Path):
+def make_handler(
+    latest_path: Path,
+    log_path: Path | None = None,
+    config_path: Path | None = None,
+):
+    active_log_path = log_path or DEFAULT_LOG_PATH
+
     class ApiHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             try:
-                status, payload = route_request(self.path, latest_path, log_path)
+                status, payload = route_request(self.path, latest_path, active_log_path, config_path)
             except (FileNotFoundError, ValueError) as exc:
                 status = HTTPStatus.SERVICE_UNAVAILABLE
                 payload = {"ok": False, "error": str(exc)}
@@ -290,7 +352,7 @@ def make_handler(latest_path: Path, log_path: Path):
             body = self.rfile.read(content_length)
 
             try:
-                status, payload = route_webhook(body, content_type, latest_path, log_path)
+                status, payload = route_webhook(body, content_type, latest_path, active_log_path, config_path)
             except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
                 status = HTTPStatus.BAD_REQUEST
                 payload = {"ok": False, "error": str(exc)}
@@ -328,6 +390,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--latest-file", default=str(DEFAULT_LATEST_PATH))
     parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
+    parser.add_argument("--config-file", default=None)
     return parser.parse_args(argv)
 
 
@@ -335,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     latest_path = Path(args.latest_file)
     log_path = Path(args.log_file)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(latest_path, log_path))
+    config_path = Path(args.config_file) if args.config_file else None
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(latest_path, log_path, config_path))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
