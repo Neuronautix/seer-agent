@@ -206,7 +206,7 @@ $(render_whatsapp_config)
         "args": [
           "$MCP_SERVER"
         ],
-        "toolTimeout": 10,
+        "toolTimeout": 30,
         "enabledTools": [
           "get_latest_observation",
           "get_metric",

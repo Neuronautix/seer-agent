@@ -18,7 +18,7 @@ SCRIPTS_DIR = ROOT_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from alarm_runtime import handle_admin_message
+from alarm_runtime import handle_admin_message, strip_whatsapp_prefix
 from observation_analysis import SEVERITY_RANK, evaluate_thresholds, load_config
 
 DEFAULT_LATEST_PATH = ROOT_DIR / "logs" / "latest-observation.json"
@@ -166,6 +166,9 @@ class WhatsAppAlarmDaemon:
             return
 
         if not content:
+            return
+
+        if strip_whatsapp_prefix(content) is None:
             return
 
         try:

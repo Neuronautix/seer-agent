@@ -10,6 +10,7 @@ from typing import Any
 from observation_analysis import DEFAULT_CONFIG_PATH, load_config
 
 DEFAULT_ADMIN_PASSWORD = "8888"
+WHATSAPP_PREFIX = "@ssa"
 TEMPERATURE_ALIASES = {"temp", "temperature"}
 SHOW_KEYWORDS = {"show", "list", "status", "thresholds", "alarms"}
 UPDATE_KEYWORDS = {"set", "update", "change"}
@@ -17,6 +18,19 @@ UPDATE_KEYWORDS = {"set", "update", "change"}
 
 def get_admin_password() -> str:
     return os.environ.get("SSA_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
+
+
+def strip_whatsapp_prefix(message_text: str) -> str | None:
+    normalized = " ".join(message_text.strip().split())
+    if not normalized:
+        return None
+
+    lowered = normalized.lower()
+    if lowered == WHATSAPP_PREFIX:
+        return ""
+    if lowered.startswith(f"{WHATSAPP_PREFIX} "):
+        return normalized[len(WHATSAPP_PREFIX):].strip()
+    return None
 
 
 def _config_thresholds_only(config: dict[str, Any]) -> dict[str, Any]:
@@ -108,9 +122,13 @@ def handle_admin_message(
     config_path: Path | None = None,
     password: str | None = None,
 ) -> dict[str, Any] | None:
-    normalized = " ".join(message_text.strip().split())
-    if not normalized:
+    stripped = strip_whatsapp_prefix(message_text)
+    if stripped is None:
         return None
+
+    normalized = stripped
+    if not normalized:
+        raise ValueError("Use @ssa 8888 thresholds or @ssa 8888 set temp 30.")
 
     tokens = normalized.split()
     expected_password = password or get_admin_password()
@@ -119,14 +137,14 @@ def handle_admin_message(
 
     command_tokens = tokens[1:]
     if not command_tokens:
-        raise ValueError("Use 8888 thresholds or 8888 set temp 30.")
+        raise ValueError("Use @ssa 8888 thresholds or @ssa 8888 set temp 30.")
 
     lowered = [token.lower() for token in command_tokens]
     if lowered[0] in {"help", "?"}:
         return {
             "ok": True,
             "action": "admin_help",
-            "reply": "Admin commands: 8888 thresholds, 8888 set temp 30, 8888 set temp critical 35.",
+            "reply": "Admin commands: @ssa 8888 thresholds, @ssa 8888 set temp 30, @ssa 8888 set temp critical 35.",
         }
 
     config = load_config(config_path)
@@ -143,12 +161,12 @@ def handle_admin_message(
     if lowered[0] in UPDATE_KEYWORDS:
         lowered = lowered[1:]
         if not lowered:
-            raise ValueError("Use 8888 set temp 30 or 8888 set temp critical 35.")
+            raise ValueError("Use @ssa 8888 set temp 30 or @ssa 8888 set temp critical 35.")
 
     if lowered and lowered[0] in {"threshold", "thresholds", "alarm", "alarms"}:
         lowered = lowered[1:]
         if not lowered:
-            raise ValueError("Use 8888 set temp 30 or 8888 thresholds.")
+            raise ValueError("Use @ssa 8888 set temp 30 or @ssa 8888 thresholds.")
 
     if lowered[0] not in TEMPERATURE_ALIASES:
         raise ValueError("Only temperature threshold updates are supported over WhatsApp right now.")
@@ -163,7 +181,7 @@ def handle_admin_message(
 
     threshold_key, value, trailing = _parse_temperature_update(lowered[1:])
     if trailing:
-        raise ValueError("Too many arguments. Use 8888 set temp 30 or 8888 set temp critical 35.")
+        raise ValueError("Too many arguments. Use @ssa 8888 set temp 30 or @ssa 8888 set temp critical 35.")
 
     implicit_warning_update = threshold_key == "warningMax" and len(lowered[1:]) == 1
     updated_config, adjustments = update_temperature_threshold(

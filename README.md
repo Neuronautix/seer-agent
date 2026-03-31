@@ -664,13 +664,23 @@ The bridge listens locally on `ws://127.0.0.1:3001`.
 
 ### 8. Administrative WhatsApp commands
 
+Nanobot and the deterministic admin daemon now answer only to WhatsApp messages that start with `@ssa`.
+
 Send one of these messages from an allowed WhatsApp chat:
 
-- `8888 thresholds`
-- `8888 set temp 30`
-- `8888 set temp critical 35`
+- `@ssa 8888 thresholds`
+- `@ssa 8888 set temp 30`
+- `@ssa 8888 set temp critical 35`
 
 Those commands update `threshold-config.json` directly. They do not go through the model.
+
+Normal read-only sensor questions must also start with `@ssa`, for example:
+
+- `@ssa temperature`
+- `@ssa what is the current humidity?`
+- `@ssa what is the threshold status?`
+
+If the message does not start with `@ssa`, the deployment is expected to stay silent.
 
 ### 9. Automatic temperature alarm messages
 
@@ -689,10 +699,10 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 Send a WhatsApp message from an allowed sender such as:
 
-- What is the current temperature?
-- What is the current humidity?
-- What is the current pressure?
-- What is the threshold status?
+- `@ssa what is the current temperature?`
+- `@ssa what is the current humidity?`
+- `@ssa what is the current pressure?`
+- `@ssa what is the threshold status?`
 
 Expected behavior:
 
@@ -700,6 +710,23 @@ Expected behavior:
 - Replies come from validated local data, not from the serial device directly.
 - Pressure may be reported as unavailable if the connected sensor does not emit it.
 - Group chats remain quiet unless the linked account is mentioned when `NANOBOT_WHATSAPP_GROUP_POLICY=mention`.
+
+Current default thresholds, unless `threshold-config.json` overrides them:
+
+- Temperature warning: `28.0 C`
+- Temperature critical: `35.0 C`
+- Humidity warning: `70.0 %`
+- Humidity critical: `85.0 %`
+- Pressure warning band: `980.0` to `1035.0 hPa`
+- Pressure critical band: `960.0` to `1060.0 hPa`
+
+If WhatsApp replies with a message such as `unable to retrieve temperature, sensor timed out`, that means the Nanobot MCP call hit its timeout, not that the ingest pipeline necessarily failed. Check these first:
+
+- `ssa status`
+- `curl -s http://127.0.0.1:8080/latest/temp`
+- `sudo journalctl -u sovereign-sensor-nanobot.service -n 50 --no-pager`
+
+The runtime MCP tool timeout is configured in `deploy/nanobot/start_nanobot.sh` and is now set to 30 seconds.
 
 If `gateway` logs `Connect call failed ('127.0.0.1', 3001)`, the WhatsApp bridge is not running yet.
 

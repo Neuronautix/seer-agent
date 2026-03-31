@@ -568,7 +568,7 @@ class PipelineTests(unittest.TestCase):
             try:
                 update_request = urllib.request.Request(
                     f"{base_url}/webhook",
-                    data=json.dumps({"text": "8888 set temp 30"}).encode("utf-8"),
+                    data=json.dumps({"text": "@ssa 8888 set temp 30"}).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
