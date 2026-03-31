@@ -9,6 +9,21 @@ usage() {
   echo "Usage: ssa {install|up|down|restart|status|login|bridge|gateway}" >&2
 }
 
+print_started_message() {
+  cat <<'EOF'
+SSA stack started.
+Use these commands next:
+  ssa status
+  ssa stop
+  ssa restart
+
+WhatsApp messages must start with:
+  @ssa what is the current temperature?
+  @ssa what is the threshold status?
+  @ssa 8888 thresholds
+EOF
+}
+
 COMMAND="${1:-help}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -22,7 +37,8 @@ case "$COMMAND" in
     echo "Installed $target -> $ROOT_DIR/scripts/ssa"
     ;;
   up|start)
-    exec sudo systemctl start "$STACK_SERVICE"
+    sudo systemctl start "$STACK_SERVICE"
+    print_started_message
     ;;
   down|stop)
     exec sudo systemctl stop "$STACK_SERVICE"
