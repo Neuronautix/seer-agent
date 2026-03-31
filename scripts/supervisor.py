@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from observation_analysis import evaluate_thresholds, load_config as load_analysis_config, read_latest_observation, read_recent_observations, summarize_window
+from observation_analysis import evaluate_thresholds, load_config as load_analysis_config, read_latest_observation, read_observations_in_window, read_recent_observations, summarize_window
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LOG_PATH = SCRIPT_DIR.parent / "logs" / "validated-observations.jsonl"
@@ -98,9 +98,31 @@ def handle_get_alarm_status(log_path: Path, config: dict[str, Any]) -> dict[str,
     }
 
 
-def handle_summarize_window(log_path: Path, config: dict[str, Any], count: int, subject: str) -> dict[str, Any]:
-    observations = read_recent_observations(log_path, count=count)
-    response = summarize_window(observations, config, requested_count=count, subject=subject)
+def handle_summarize_window(
+    log_path: Path,
+    config: dict[str, Any],
+    count: int | None,
+    subject: str,
+    since_minutes: int | None,
+    bucket_minutes: int | None,
+) -> dict[str, Any]:
+    if since_minutes is not None and count is not None:
+        raise ValueError("summarize_window accepts either count or since_minutes, not both")
+
+    if since_minutes is not None:
+        observations = read_observations_in_window(log_path, since_minutes=since_minutes)
+    else:
+        resolved_count = count if count is not None else 10
+        observations = read_recent_observations(log_path, count=resolved_count)
+
+    response = summarize_window(
+        observations,
+        config,
+        requested_count=count,
+        subject=subject,
+        since_minutes=since_minutes,
+        bucket_minutes=bucket_minutes,
+    )
     response.update(
         {
             "sensorId": observations[-1].get("sensorId"),
@@ -117,7 +139,9 @@ def execute_action(
     *,
     log_path: Path,
     config: dict[str, Any],
-    count: int = 10,
+    count: int | None = 10,
+    since_minutes: int | None = None,
+    bucket_minutes: int | None = None,
 ) -> dict[str, Any]:
     if action == "read_latest":
         if subject not in {"temperature", "humidity", "pressure"}:
@@ -136,7 +160,7 @@ def execute_action(
 
     if action == "summarize_window":
         resolved_subject = (subject or "all").lower()
-        return handle_summarize_window(log_path, config, count, resolved_subject)
+        return handle_summarize_window(log_path, config, count, resolved_subject, since_minutes, bucket_minutes)
 
     raise ValueError(f"unsupported action: {action}")
 
@@ -148,6 +172,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
     parser.add_argument("--config", default=None)
     parser.add_argument("--count", type=int, default=10)
+    parser.add_argument("--since-minutes", type=int, default=None)
+    parser.add_argument("--bucket-minutes", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -163,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             log_path=log_path,
             config=load_config(config_path),
             count=args.count,
+            since_minutes=args.since_minutes,
+            bucket_minutes=args.bucket_minutes,
         )
     except (FileNotFoundError, OSError, ValueError, KeyError, TypeError) as exc:
         json.dump(

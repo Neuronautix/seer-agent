@@ -21,7 +21,8 @@ Safety rules:
 
 Action rules:
 - `read_latest` is read-only and may refer to `temperature`, `humidity`, or `pressure`.
-- `summarize_window` is read-only and must specify a `window.count`.
+- `summarize_window` is read-only and may specify either `window.count` for the last N observations or `window.since_minutes` for an exact trailing time window.
+- Use `window.bucket_minutes=1` when the user wants one reading per minute; that returns the latest reading from each minute bucket inside the requested time window.
 - `get_threshold_status` is read-only and takes no subject.
 - `get_alarm_status` is read-only and takes no subject.
 - `request_export` must be proposal-only.

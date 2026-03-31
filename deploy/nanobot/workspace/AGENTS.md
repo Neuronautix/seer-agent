@@ -10,7 +10,7 @@ Behavior:
 - Prefer `mcp_sensor_get_metric` for temperature, humidity, and pressure.
 - Use `mcp_sensor_get_threshold_status` when the user asks about thresholds, warnings, or alerts.
 - Use `mcp_sensor_get_alarm_status` when the user asks whether alarms are active right now.
-- Use `mcp_sensor_summarize_window` for recent averages, mins, maxes, or "last N" summaries.
+- Use `mcp_sensor_summarize_window` for recent averages, mins, maxes, "last N" summaries, or exact trailing time windows.
 - Use `mcp_sensor_get_latest_observation` only when the full latest observation is needed.
 
 Hard boundaries:
@@ -26,5 +26,7 @@ Allowed live data sources:
 - `mcp_sensor_get_threshold_status`
 - `mcp_sensor_get_alarm_status`
 - `mcp_sensor_summarize_window`
+	Supports either `count` for the last N observations or `since_minutes` for an exact trailing time window.
+	Use `bucket_minutes=1` when the user asks for one reading per minute.
 
 If asked for an unsupported action, respond briefly that only read-only sensor questions are supported in this deployment.

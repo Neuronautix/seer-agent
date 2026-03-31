@@ -355,6 +355,11 @@ class PipelineTests(unittest.TestCase):
                     urllib.request.urlopen(f"{base_url}/latest/alarm-status").read().decode("utf-8")
                 )
                 summary = json.loads(urllib.request.urlopen(f"{base_url}/summary?count=1&subject=all").read().decode("utf-8"))
+                precise_summary = json.loads(
+                    urllib.request.urlopen(
+                        f"{base_url}/summary?since_minutes=30&bucket_minutes=1&subject=temperature"
+                    ).read().decode("utf-8")
+                )
 
                 self.assertTrue(root["ok"])
                 self.assertIn("/latest/temp", root["endpoints"])
@@ -366,6 +371,8 @@ class PipelineTests(unittest.TestCase):
                 self.assertFalse(alarm_status["hasActiveAlarms"])
                 self.assertEqual(summary["action"], "summarize_window")
                 self.assertEqual(summary["summary"]["temperature"]["average"], 23.4)
+                self.assertEqual(precise_summary["window"]["requestedSinceMinutes"], 30)
+                self.assertEqual(precise_summary["window"]["bucketMinutes"], 1)
 
                 request = urllib.request.Request(f"{base_url}/latest", method="POST")
                 with self.assertRaises(urllib.error.HTTPError) as error:
@@ -511,6 +518,16 @@ class PipelineTests(unittest.TestCase):
                 )
                 summary_response = json.loads(urllib.request.urlopen(summary_request).read().decode("utf-8"))
 
+                precise_summary_request = urllib.request.Request(
+                    f"{base_url}/webhook",
+                    data=json.dumps({"text": "summary last 10 minutes temperature one reading per minute"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                precise_summary_response = json.loads(
+                    urllib.request.urlopen(precise_summary_request).read().decode("utf-8")
+                )
+
                 alarm_request = urllib.request.Request(
                     f"{base_url}/webhook",
                     data=json.dumps({"text": "any alarm right now?"}).encode("utf-8"),
@@ -525,6 +542,9 @@ class PipelineTests(unittest.TestCase):
                 self.assertIn("23.4", form_response["reply"])
                 self.assertEqual(summary_response["action"], "summarize_window")
                 self.assertEqual(summary_response["data"]["window"]["actualCount"], 2)
+                self.assertEqual(precise_summary_response["action"], "summarize_window")
+                self.assertEqual(precise_summary_response["data"]["window"]["requestedSinceMinutes"], 10)
+                self.assertEqual(precise_summary_response["data"]["window"]["bucketMinutes"], 1)
                 self.assertEqual(alarm_response["action"], "get_alarm_status")
                 self.assertFalse(alarm_response["data"]["hasActiveAlarms"])
             finally:

@@ -226,6 +226,60 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(response["summary"]["temperature"]["average"], 23.0)
             self.assertEqual(response["summary"]["temperature"]["latest"], 24.0)
 
+    def test_summarize_window_supports_precise_time_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            write_jsonl(
+                log_path,
+                [
+                    self.make_observation(temperature=20.0, observed_at="2026-03-29T09:29:00Z"),
+                    self.make_observation(temperature=22.0, observed_at="2026-03-29T09:30:00Z"),
+                    self.make_observation(temperature=24.0, observed_at="2026-03-29T09:45:00Z"),
+                    self.make_observation(temperature=26.0, observed_at="2026-03-29T10:00:00Z"),
+                ],
+            )
+
+            response = execute_action(
+                "summarize_window",
+                "temperature",
+                log_path=log_path,
+                config=load_config(),
+                count=None,
+                since_minutes=30,
+            )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["window"]["requestedSinceMinutes"], 30)
+            self.assertEqual(response["window"]["actualCount"], 3)
+            self.assertEqual(response["summary"]["temperature"]["average"], 24.0)
+
+    def test_summarize_window_supports_one_reading_per_minute(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "validated-observations.jsonl"
+            write_jsonl(
+                log_path,
+                [
+                    self.make_observation(temperature=20.0, observed_at="2026-03-29T10:00:05Z"),
+                    self.make_observation(temperature=22.0, observed_at="2026-03-29T10:00:50Z"),
+                    self.make_observation(temperature=24.0, observed_at="2026-03-29T10:01:10Z"),
+                ],
+            )
+
+            response = execute_action(
+                "summarize_window",
+                "temperature",
+                log_path=log_path,
+                config=load_config(),
+                count=None,
+                since_minutes=2,
+                bucket_minutes=1,
+            )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["window"]["bucketMinutes"], 1)
+            self.assertEqual(response["window"]["actualCount"], 2)
+            self.assertEqual(response["summary"]["temperature"]["average"], 23.0)
+
     def test_read_latest_pressure_fails_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "validated-observations.jsonl"

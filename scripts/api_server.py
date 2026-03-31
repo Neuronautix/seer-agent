@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from alarm_runtime import handle_admin_message
-from observation_analysis import evaluate_thresholds, load_config, read_recent_observations, summarize_window
+from observation_analysis import evaluate_thresholds, load_config, read_observations_in_window, read_recent_observations, summarize_window
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LATEST_PATH = SCRIPT_DIR.parent / "logs" / "latest-observation.json"
@@ -57,6 +57,7 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
             "/latest/threshold-status",
             "/latest/alarm-status",
             "/summary?count=10&subject=all",
+            "/summary?since_minutes=30&bucket_minutes=1&subject=temperature",
             "/webhook",
         ],
     }
@@ -114,9 +115,32 @@ def build_alarm_payload(observation: dict[str, Any], config_path: Path | None) -
     }
 
 
-def build_summary_payload(log_path: Path, count: int, subject: str, config_path: Path | None) -> dict[str, Any]:
-    observations = read_recent_observations(log_path, count=count)
-    payload = summarize_window(observations, load_config(config_path), requested_count=count, subject=subject)
+def build_summary_payload(
+    log_path: Path,
+    count: int | None,
+    subject: str,
+    config_path: Path | None,
+    *,
+    since_minutes: int | None = None,
+    bucket_minutes: int | None = None,
+) -> dict[str, Any]:
+    if since_minutes is not None and count is not None:
+        raise ValueError("summary accepts either count or since_minutes, not both")
+
+    if since_minutes is not None:
+        observations = read_observations_in_window(log_path, since_minutes=since_minutes)
+    else:
+        resolved_count = count if count is not None else 10
+        observations = read_recent_observations(log_path, count=resolved_count)
+
+    payload = summarize_window(
+        observations,
+        load_config(config_path),
+        requested_count=count,
+        subject=subject,
+        since_minutes=since_minutes,
+        bucket_minutes=bucket_minutes,
+    )
     payload.update(
         {
             "sensorId": observations[-1].get("sensorId"),
@@ -261,9 +285,18 @@ def route_request(
 
     if parsed.path == "/summary":
         params = parse_qs(parsed.query, keep_blank_values=False)
-        count = int(params.get("count", ["10"])[0])
+        count = int(params["count"][0]) if "count" in params else None
+        since_minutes = int(params["since_minutes"][0]) if "since_minutes" in params else None
+        bucket_minutes = int(params["bucket_minutes"][0]) if "bucket_minutes" in params else None
         subject = params.get("subject", ["all"])[0].strip().lower()
-        return HTTPStatus.OK, build_summary_payload(log_path, count=count, subject=subject, config_path=config_path)
+        return HTTPStatus.OK, build_summary_payload(
+            log_path,
+            count=count,
+            subject=subject,
+            config_path=config_path,
+            since_minutes=since_minutes,
+            bucket_minutes=bucket_minutes,
+        )
 
     observation = load_latest_observation(latest_path)
 
@@ -298,19 +331,33 @@ def route_webhook(
     observation = load_latest_observation(latest_path)
     normalized = " ".join(message_text.lower().split())
     if any(keyword in normalized for keyword in ("summary", "average", "avg", "recent", "last")):
-        params = parse_qs("")
-        del params
-        count = 10
+        count: int | None = 10
+        since_minutes: int | None = None
+        bucket_minutes: int | None = None
         for token in normalized.split():
             if token.isdigit():
-                count = int(token)
+                numeric_value = int(token)
+                if "minute" in normalized:
+                    since_minutes = numeric_value
+                    count = None
+                else:
+                    count = numeric_value
                 break
+        if "one data per minute" in normalized or "one reading per minute" in normalized:
+            bucket_minutes = 1
         subject = "all"
         for metric_name in METRICS:
             if metric_name in normalized:
                 subject = metric_name
                 break
-        summary_payload = build_summary_payload(log_path, count=count, subject=subject, config_path=config_path)
+        summary_payload = build_summary_payload(
+            log_path,
+            count=count,
+            subject=subject,
+            config_path=config_path,
+            since_minutes=since_minutes,
+            bucket_minutes=bucket_minutes,
+        )
         return HTTPStatus.OK, {
             "ok": True,
             "reply": build_summary_reply(summary_payload, subject),

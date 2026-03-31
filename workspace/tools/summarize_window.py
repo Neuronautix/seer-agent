@@ -12,7 +12,7 @@ SCRIPTS_DIR = ROOT_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from observation_analysis import load_config, read_recent_observations, summarize_window
+from observation_analysis import load_config, read_observations_in_window, read_recent_observations, summarize_window
 
 DEFAULT_LOG_PATH = ROOT_DIR / "logs" / "validated-observations.jsonl"
 DEFAULT_CONFIG = load_config()
@@ -20,7 +20,9 @@ DEFAULT_CONFIG = load_config()
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize the last N validated observations")
-    parser.add_argument("--count", type=int, default=10)
+    parser.add_argument("--count", type=int, default=None)
+    parser.add_argument("--since-minutes", type=int, default=None)
+    parser.add_argument("--bucket-minutes", type=int, default=None)
     parser.add_argument("--subject", choices=["all", "temperature", "humidity", "pressure"], default="all")
     parser.add_argument("--log-file", default=str(DEFAULT_LOG_PATH))
     return parser.parse_args(argv)
@@ -29,8 +31,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        observations = read_recent_observations(Path(args.log_file), count=args.count)
-        payload = summarize_window(observations, DEFAULT_CONFIG, requested_count=args.count, subject=args.subject)
+        if args.since_minutes is not None and args.count is not None:
+            raise ValueError("choose either --count or --since-minutes")
+
+        resolved_count = args.count if args.count is not None else 10
+        if args.since_minutes is not None:
+            observations = read_observations_in_window(Path(args.log_file), since_minutes=args.since_minutes)
+        else:
+            observations = read_recent_observations(Path(args.log_file), count=resolved_count)
+
+        payload = summarize_window(
+            observations,
+            DEFAULT_CONFIG,
+            requested_count=None if args.since_minutes is not None else resolved_count,
+            subject=args.subject,
+            since_minutes=args.since_minutes,
+            bucket_minutes=args.bucket_minutes,
+        )
         payload.update(
             {
                 "sensorId": observations[-1].get("sensorId"),

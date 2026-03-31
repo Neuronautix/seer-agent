@@ -55,13 +55,32 @@ def get_alarm_status() -> str:
 
 
 @SERVER.tool()
-def summarize_window(count: int = 10, subject: str = "all") -> str:
+def summarize_window(
+    count: int | None = 10,
+    subject: str = "all",
+    since_minutes: int | None = None,
+    bucket_minutes: int | None = None,
+) -> str:
     normalized_subject = subject.strip().lower()
     if normalized_subject not in {"all", "temperature", "humidity", "pressure"}:
         raise ValueError("subject must be all, temperature, humidity, or pressure")
-    if count < 1:
+    if count is not None and count < 1:
         raise ValueError("count must be at least 1")
-    return run_tool("summarize_window.py", "--count", str(count), "--subject", normalized_subject)
+    if since_minutes is not None and since_minutes < 1:
+        raise ValueError("since_minutes must be at least 1")
+    if bucket_minutes is not None and bucket_minutes < 1:
+        raise ValueError("bucket_minutes must be at least 1")
+    if since_minutes is not None and count is not None:
+        raise ValueError("choose either count or since_minutes")
+
+    args = ["--subject", normalized_subject]
+    if since_minutes is not None:
+        args.extend(["--since-minutes", str(since_minutes)])
+    else:
+        args.extend(["--count", str(10 if count is None else count)])
+    if bucket_minutes is not None:
+        args.extend(["--bucket-minutes", str(bucket_minutes)])
+    return run_tool("summarize_window.py", *args)
 
 
 if __name__ == "__main__":

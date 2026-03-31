@@ -54,7 +54,7 @@ class WhatsAppAlarmDaemon:
         self.allow_self_messages = os.environ.get("NANOBOT_WHATSAPP_ALLOW_SELF_MESSAGES", "false") == "true"
         self.self_chat_only = os.environ.get("NANOBOT_WHATSAPP_SELF_CHAT_ONLY", "false") == "true"
         self.allowed_ids = self._parse_id_list(os.environ.get("NANOBOT_WHATSAPP_ALLOW_FROM", ""))
-        alert_targets_raw = os.environ.get("SSA_WHATSAPP_ALERT_TO") or os.environ.get("NANOBOT_WHATSAPP_ALLOW_FROM", "")
+        alert_targets_raw = os.environ.get("SSA_WHATSAPP_ALERT_TO", "")
         self.alert_targets = self._parse_id_list(alert_targets_raw)
         self.config_path = Path(os.environ.get("SSA_THRESHOLD_CONFIG", ROOT_DIR / "threshold-config.json"))
         self.latest_path = Path(os.environ.get("SSA_LATEST_OBSERVATION", DEFAULT_LATEST_PATH))

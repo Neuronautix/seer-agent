@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -95,6 +96,71 @@ def read_recent_observations(log_path: Path, count: int) -> list[dict[str, Any]]
     return observations
 
 
+def _parse_observed_at(value: str) -> datetime:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("validated observation missing observedAt")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    timestamp = datetime.fromisoformat(normalized)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def read_observations_in_window(log_path: Path, since_minutes: int) -> list[dict[str, Any]]:
+    if since_minutes < 1:
+        raise ValueError("since_minutes must be at least 1")
+    if not log_path.exists():
+        raise FileNotFoundError(f"validated observation log not found: {log_path}")
+
+    observations: list[dict[str, Any]] = []
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            observations.append(payload)
+
+    if not observations:
+        raise ValueError("validated observation log is empty")
+
+    latest_timestamp = _parse_observed_at(str(observations[-1].get("observedAt") or ""))
+    window_start = latest_timestamp - timedelta(minutes=since_minutes)
+    selected = [
+        observation
+        for observation in observations
+        if observation.get("observedAt") and _parse_observed_at(str(observation.get("observedAt") or "")) >= window_start
+    ]
+    if not selected:
+        raise ValueError("validated observation log is empty")
+    return selected
+
+
+def bucket_observations(observations: Iterable[dict[str, Any]], bucket_minutes: int) -> list[dict[str, Any]]:
+    if bucket_minutes < 1:
+        raise ValueError("bucket_minutes must be at least 1")
+
+    buckets: dict[datetime, dict[str, Any]] = {}
+    ordered_keys: list[datetime] = []
+    for observation in observations:
+        timestamp = _parse_observed_at(str(observation.get("observedAt") or ""))
+        minute_floor = timestamp.replace(second=0, microsecond=0)
+        bucket_offset = minute_floor.minute % bucket_minutes
+        bucket_start = minute_floor - timedelta(minutes=bucket_offset)
+        if bucket_start not in buckets:
+            ordered_keys.append(bucket_start)
+        buckets[bucket_start] = observation
+
+    return [buckets[key] for key in ordered_keys]
+
+
 def metric_config(config: dict[str, Any], metric_name: str) -> dict[str, Any]:
     thresholds = config.get("thresholds")
     if not isinstance(thresholds, dict):
@@ -180,14 +246,19 @@ def summarize_window(
     observations: Iterable[dict[str, Any]],
     config: dict[str, Any],
     *,
-    requested_count: int,
+    requested_count: int | None,
     subject: str,
+    since_minutes: int | None = None,
+    bucket_minutes: int | None = None,
 ) -> dict[str, Any]:
     observation_list = list(observations)
     if not observation_list:
         raise ValueError("validated observation log is empty")
     if subject not in {"all", *METRIC_ORDER}:
         raise ValueError("subject must be temperature, humidity, pressure, or all")
+
+    if bucket_minutes is not None:
+        observation_list = bucket_observations(observation_list, bucket_minutes)
 
     selected_metrics = list(METRIC_ORDER if subject == "all" else (subject,))
     summary: dict[str, Any] = {}
@@ -247,10 +318,13 @@ def summarize_window(
         "action": "summarize_window",
         "window": {
             "requestedCount": requested_count,
+            "requestedSinceMinutes": since_minutes,
             "actualCount": len(observation_list),
             "subject": subject,
             "observedFrom": observation_list[0].get("observedAt"),
             "observedTo": observation_list[-1].get("observedAt"),
+            "bucketMinutes": bucket_minutes,
+            "sampling": "latest_per_bucket" if bucket_minutes is not None else "raw_observations",
         },
         "overallStatus": overall_status,
         "summary": summary,

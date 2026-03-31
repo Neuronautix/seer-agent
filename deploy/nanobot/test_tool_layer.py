@@ -86,6 +86,15 @@ async def main() -> int:
                 print(json.dumps({"ok": False, "error": "summary tool returned failure"}))
                 return 1
 
+            exact_window_result = await session.call_tool(
+                "summarize_window",
+                arguments={"since_minutes": 5, "bucket_minutes": 1, "subject": "temperature", "count": None},
+            )
+            exact_window_payload = json.loads(flatten_text(exact_window_result))
+            if not exact_window_payload.get("ok"):
+                print(json.dumps({"ok": False, "error": "precise summary tool returned failure"}))
+                return 1
+
             statuses = threshold_payload.get("thresholdStatus", {})
             for metric_name in ("temperature", "humidity", "pressure"):
                 if metric_name not in statuses:
@@ -101,6 +110,7 @@ async def main() -> int:
                 "thresholdMetrics": sorted(statuses),
                 "overallStatus": alarm_payload.get("overallStatus"),
                 "summaryWindow": summary_payload.get("window", {}).get("actualCount"),
+                "preciseWindowMinutes": exact_window_payload.get("window", {}).get("requestedSinceMinutes"),
                 "source": "validated local files via workspace/tools wrappers",
             },
             separators=(",", ":"),

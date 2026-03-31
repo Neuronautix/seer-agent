@@ -9,7 +9,5 @@
 Using Baileys version: 2.3000.1035194821
 🔗 Python client connected
 ✅ Connected to WhatsApp
-[WA RAW TEMP] {"upsertType":"notify","remoteJid":"170639184896160@lid","remoteJidAlt":"33785306470@s.whatsapp.net","fromMe":true,"participant":"","id":"3EB07992DF8CFF598C8914","ts":1774943286,"pushName":"Damien HUZARD","selfIds":["33785306470","170639184896160"]}
+[WA RAW TEMP] {"upsertType":"notify","remoteJid":"170639184896160@lid","remoteJidAlt":"33785306470@s.whatsapp.net","fromMe":true,"participant":"","id":"3EB0304BD8402C9B829556","ts":1774950671,"pushName":"Damien HUZARD","selfIds":["33785306470","170639184896160"]}
 🔗 Python client connected
-[WA RAW TEMP] {"upsertType":"notify","remoteJid":"152081134542885@lid","remoteJidAlt":"33652217952@s.whatsapp.net","fromMe":false,"participant":"","id":"AC93E6F201BE2EAC06A8AC239025BD16","ts":1774943387,"pushName":"Lolo","selfIds":["33785306470","170639184896160"]}
-[WA RAW TEMP] {"upsertType":"notify","remoteJid":"33652217952@s.whatsapp.net","remoteJidAlt":"152081134542885@lid","fromMe":true,"participant":"","id":"3EB0122371C5A091449564","ts":1774943416,"pushName":"Damien HUZARD","selfIds":["33785306470","170639184896160"]}
