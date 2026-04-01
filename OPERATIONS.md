@@ -291,6 +291,131 @@ These units now wait on `network-online.target`, so after a reboot the stack sta
 
 This deployment is not a Pod today. It is a set of host-level `systemd` services on the Raspberry Pi. Pod-style packaging is tracked separately in `SOLID_POD_IMPLEMENTATION.md`.
 
+### Freshness watchdog timer
+
+A systemd timer runs `watchdog.py` every 5 minutes after boot and writes `logs/watchdog-status.json`.
+
+Enable it alongside the other units:
+
+```bash
+sudo systemctl enable sovereign-sensor-watchdog.timer
+sudo systemctl start sovereign-sensor-watchdog.timer
+```
+
+Run a one-shot freshness check at any time:
+
+```bash
+ssa watchdog
+```
+
+View the last result:
+
+```bash
+cat logs/watchdog-status.json
+```
+
+## Deploy, Rollback, Backup, and Restore
+
+### First-time installation
+
+Clone the repository and run install once:
+
+```bash
+git clone <repo-url> sovereign-sensor-agent
+cd sovereign-sensor-agent
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
+# edit nanobot.env: set GEMINI_API_KEY and SSA_ADMIN_PASSWORD
+scripts/ssa install          # copies service files, enables ingest+api+watchdog at boot
+sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service
+```
+
+`ssa install` does the following in one step:
+- Creates `/usr/local/bin/ssa` symlink
+- Copies all `deploy/systemd/*.service` and `*.timer` to `/etc/systemd/system/`
+- Runs `systemctl daemon-reload`
+- Enables `sovereign-sensor-ingest`, `sovereign-sensor-api`, and `sovereign-sensor-watchdog.timer` at boot
+- Does **not** enable `sovereign-sensor-nanobot` (that stays manual)
+
+### Upgrading to a new version
+
+```bash
+ssa deploy
+```
+
+This performs a zero-downtime-minimising upgrade:
+1. Saves the current git commit to `.last-deploy-commit`
+2. Stops ingest and API
+3. `git pull` on the current tracking branch
+4. `pip install -r requirements.txt` (reinstalls only changed packages)
+5. Copies updated service files to `/etc/systemd/system/` and reloads systemd
+6. Restarts ingest and API
+
+Verify after deploying:
+
+```bash
+ssa health
+```
+
+### Rolling back to the previous version
+
+If a deploy introduces a regression, roll back with:
+
+```bash
+ssa rollback
+```
+
+This resets the working tree to the commit saved by the last `ssa deploy`, reinstalls dependencies from that commit's `requirements.txt`, reloads systemd units, and restarts services.
+
+Roll back is only available once per deploy (the saved commit is removed after use). For older revisions, roll back manually:
+
+```bash
+git log --oneline -10           # find the target commit hash
+sudo systemctl stop sovereign-sensor-ingest.service sovereign-sensor-api.service
+git reset --hard <commit-hash>
+.venv/bin/pip install -r requirements.txt
+sudo cp deploy/systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service
+```
+
+### Backing up runtime data
+
+Backs up `logs/`, `threshold-config.json`, and WhatsApp auth state (if present) into a timestamped tarball:
+
+```bash
+ssa backup                  # saves to backups/ssa-backup-<timestamp>.tar.gz
+ssa backup /mnt/usb/backups # save to a custom path
+```
+
+The backup **does not** include `.venv/` or source code (both are reproducible).
+
+Keep at least one recent backup before any `ssa deploy` or hardware change.
+
+### Restoring from a backup
+
+```bash
+ssa restore backups/ssa-backup-20260401T120000Z.tar.gz
+```
+
+This stops services, extracts the tarball into the repository root (restoring `logs/` and threshold config in place), then restarts ingest and API.
+
+WhatsApp auth state is restored automatically if it was included in the backup. No re-login is needed.
+
+### What each backup contains
+
+| Path | Description |
+|------|-------------|
+| `logs/validated-observations.jsonl` | Append-only sensor audit trail |
+| `logs/latest-observation.json` | Latest snapshot |
+| `logs/rejected-lines.jsonl` | Validation failure log |
+| `logs/watchdog-status.json` | Last watchdog result |
+| `threshold-config.json` | User-configured thresholds (if set) |
+| `deploy/nanobot/auth_info_multidevice/` | WhatsApp session auth (if present) |
+
+`nanobot.env` is **not** included because it contains secrets. Back it up separately if needed.
+
 ## What Is Still Missing
 
 - A completed WhatsApp bridge login session.

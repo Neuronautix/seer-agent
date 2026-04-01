@@ -20,5 +20,9 @@ memory/
 cron/
 .nanobot/
 
+# Deploy runtime files
+.last-deploy-commit
+backups/
+
 # Editor settings
 .vscode/
