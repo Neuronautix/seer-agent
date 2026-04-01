@@ -3,10 +3,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 STACK_SERVICE="sovereign-sensor-nanobot.service"
+API_PORT=8080
 
 usage() {
-  echo "Usage: ssa {install|up|down|restart|status|login|bridge|gateway}" >&2
+  echo "Usage: ssa {install|up|down|restart|status|health|login|bridge|gateway}" >&2
 }
 
 print_started_message() {
@@ -48,6 +50,42 @@ case "$COMMAND" in
     ;;
   status)
     exec sudo systemctl --no-pager --full status sovereign-sensor-ingest.service sovereign-sensor-api.service "$STACK_SERVICE"
+    ;;
+  health|check)
+    echo "=== Sovereign Sensor Agent Health ==="
+    echo ""
+
+    # systemd service states
+    printf "  %-46s %s\n" "SERVICE" "STATE"
+    printf "  %-46s %s\n" "-------" "-----"
+    for svc in sovereign-sensor-ingest.service sovereign-sensor-api.service "$STACK_SERVICE"; do
+      state=$(systemctl is-active "$svc" 2>/dev/null || true)
+      printf "  %-46s %s\n" "$svc" "${state:-unknown}"
+    done
+    echo ""
+
+    # API freshness via /health endpoint
+    health_json=$("$PYTHON_BIN" - "$API_PORT" <<'PY' 2>/dev/null || echo '{"ok":false,"error":"API unreachable on port '$API_PORT'"}')
+import json, sys, urllib.request
+port = int(sys.argv[1])
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+        sys.stdout.write(r.read().decode())
+except Exception as e:
+    sys.stdout.write(json.dumps({"ok": False, "error": str(e)}))
+PY
+    if python3 -c "import json,sys; d=json.loads(sys.stdin.read()); sys.exit(0 if d.get('ok') else 1)" <<< "$health_json" 2>/dev/null; then
+      status_val=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('status','unknown'))" <<< "$health_json" 2>/dev/null || echo "unknown")
+      observed_at=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('lastObservationAt','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
+      age=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('freshnessAgeSeconds','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
+      printf "  API status:            %s\n" "$status_val"
+      printf "  Last observation at:   %s\n" "$observed_at"
+      printf "  Data age (seconds):    %s\n" "$age"
+    else
+      err=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('error','unknown error'))" <<< "$health_json" 2>/dev/null || echo "unknown error")
+      printf "  API status:            unreachable (%s)\n" "$err"
+    fi
+    echo ""
     ;;
   login|link)
     exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-login "$@"

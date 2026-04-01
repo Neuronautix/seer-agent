@@ -7,9 +7,13 @@ After=network-online.target
 Type=simple
 User=dhuzard
 WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 Restart=always
 RestartSec=3
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

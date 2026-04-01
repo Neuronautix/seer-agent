@@ -15,7 +15,7 @@ from unittest import mock
 from pathlib import Path
 
 from build_observation import build_observation, normalize_timestamp
-from api_server import make_handler
+from api_server import build_health_payload, make_handler
 from ontology_guard import load_schema, validate_observation
 from read_serial import (
     ingest_stream,
@@ -608,6 +608,69 @@ class PipelineTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+
+
+class TestBuildHealthPayload(unittest.TestCase):
+    def test_returns_waiting_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            result = build_health_payload(latest_path)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "waiting_for_data")
+            self.assertFalse(result["latestObservationAvailable"])
+            self.assertNotIn("freshnessAgeSeconds", result)
+
+    def test_returns_ready_with_freshness_for_recent_observation(self) -> None:
+        from datetime import datetime, timezone, timedelta
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            recent_ts = (datetime.now(tz=timezone.utc) - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            observation = {"observedAt": recent_ts, "temperatureC": 22.0, "humidityPct": 50.0}
+            latest_path.write_text(json.dumps(observation), encoding="utf-8")
+
+            result = build_health_payload(latest_path)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "ready")
+            self.assertTrue(result["latestObservationAvailable"])
+            self.assertEqual(result["lastObservationAt"], recent_ts)
+            self.assertLessEqual(result["freshnessAgeSeconds"], 60)
+            self.assertTrue(result["isFresh"])
+
+    def test_returns_stale_for_old_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            old_ts = "2020-01-01T00:00:00Z"
+            observation = {"observedAt": old_ts, "temperatureC": 22.0, "humidityPct": 50.0}
+            latest_path.write_text(json.dumps(observation), encoding="utf-8")
+
+            result = build_health_payload(latest_path)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "stale")
+            self.assertTrue(result["latestObservationAvailable"])
+            self.assertFalse(result["isFresh"])
+            self.assertGreater(result["freshnessAgeSeconds"], 300)
+
+    def test_falls_back_gracefully_for_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            latest_path.write_text("not valid json", encoding="utf-8")
+
+            result = build_health_payload(latest_path)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "ready")
+            self.assertTrue(result["latestObservationAvailable"])
+
+    def test_falls_back_gracefully_when_observed_at_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            latest_path = Path(temp_dir) / "latest-observation.json"
+            latest_path.write_text(json.dumps({"temperatureC": 22.0}), encoding="utf-8")
+
+            result = build_health_payload(latest_path)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "ready")
+            self.assertTrue(result["latestObservationAvailable"])
+            self.assertNotIn("freshnessAgeSeconds", result)
 
 
 if __name__ == "__main__":

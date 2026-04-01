@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,10 +38,32 @@ def load_latest_observation(latest_path: Path) -> dict[str, Any]:
     return observation
 
 
+FRESHNESS_THRESHOLD_SECONDS = 300  # 5 minutes
+
+
 def build_health_payload(latest_path: Path) -> dict[str, Any]:
-    if latest_path.exists():
-        return {"ok": True, "status": "ready", "latestObservationAvailable": True}
-    return {"ok": True, "status": "waiting_for_data", "latestObservationAvailable": False}
+    if not latest_path.exists():
+        return {"ok": True, "status": "waiting_for_data", "latestObservationAvailable": False}
+
+    try:
+        observation = json.loads(latest_path.read_text(encoding="utf-8"))
+        observed_at = observation.get("observedAt")
+        if observed_at:
+            last_dt = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            age_seconds = int((datetime.now(tz=timezone.utc) - last_dt).total_seconds())
+            is_fresh = age_seconds <= FRESHNESS_THRESHOLD_SECONDS
+            return {
+                "ok": True,
+                "status": "ready" if is_fresh else "stale",
+                "latestObservationAvailable": True,
+                "lastObservationAt": observed_at,
+                "freshnessAgeSeconds": age_seconds,
+                "isFresh": is_fresh,
+            }
+    except (json.JSONDecodeError, ValueError, KeyError):
+        pass
+
+    return {"ok": True, "status": "ready", "latestObservationAvailable": True}
 
 
 def build_root_payload(latest_path: Path) -> dict[str, Any]:
