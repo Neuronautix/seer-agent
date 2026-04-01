@@ -7,8 +7,10 @@ PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 STACK_SERVICE="sovereign-sensor-nanobot.service"
 API_PORT=8080
 
+WATCHDOG_STATUS_PATH="$ROOT_DIR/logs/watchdog-status.json"
+
 usage() {
-  echo "Usage: ssa {install|up|down|restart|status|health|login|bridge|gateway}" >&2
+  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|login|bridge|gateway}" >&2
 }
 
 print_started_message() {
@@ -74,18 +76,33 @@ try:
 except Exception as e:
     sys.stdout.write(json.dumps({"ok": False, "error": str(e)}))
 PY
-    if python3 -c "import json,sys; d=json.loads(sys.stdin.read()); sys.exit(0 if d.get('ok') else 1)" <<< "$health_json" 2>/dev/null; then
-      status_val=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('status','unknown'))" <<< "$health_json" 2>/dev/null || echo "unknown")
-      observed_at=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('lastObservationAt','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
-      age=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('freshnessAgeSeconds','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
+    if "$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); sys.exit(0 if d.get('ok') else 1)" <<< "$health_json" 2>/dev/null; then
+      status_val=$("$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('status','unknown'))" <<< "$health_json" 2>/dev/null || echo "unknown")
+      observed_at=$("$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('lastObservationAt','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
+      age=$("$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('freshnessAgeSeconds','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
       printf "  API status:            %s\n" "$status_val"
       printf "  Last observation at:   %s\n" "$observed_at"
       printf "  Data age (seconds):    %s\n" "$age"
     else
-      err=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('error','unknown error'))" <<< "$health_json" 2>/dev/null || echo "unknown error")
+      err=$("$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('error','unknown error'))" <<< "$health_json" 2>/dev/null || echo "unknown error")
       printf "  API status:            unreachable (%s)\n" "$err"
     fi
     echo ""
+
+    # Watchdog status from last timer run
+    printf "  WATCHDOG\n"
+    if [[ -f "$WATCHDOG_STATUS_PATH" ]]; then
+      wd_status=$("$PYTHON_BIN" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('status','unknown'))" "$WATCHDOG_STATUS_PATH" 2>/dev/null || echo "unreadable")
+      wd_checked=$("$PYTHON_BIN" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('checkedAt','n/a'))" "$WATCHDOG_STATUS_PATH" 2>/dev/null || echo "n/a")
+      printf "  Last watchdog run:     %s\n" "$wd_checked"
+      printf "  Watchdog result:       %s\n" "$wd_status"
+    else
+      printf "  Watchdog status:       no status file yet (run: ssa watchdog)\n"
+    fi
+    echo ""
+    ;;
+  watchdog)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/watchdog.py" "$@"
     ;;
   login|link)
     exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-login "$@"

@@ -15,6 +15,10 @@ RestartSec=3
 TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
+# Security: API serves read-only HTTP; no device or serial access needed
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

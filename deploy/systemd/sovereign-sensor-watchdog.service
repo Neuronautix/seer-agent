@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Sensor Agent Freshness Watchdog
+After=sovereign-sensor-ingest.service
+
+[Service]
+Type=oneshot
+User=dhuzard
+WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/watchdog.py
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true

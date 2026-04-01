@@ -14,6 +14,9 @@ RestartSec=3
 TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
+# Security: ingest needs serial device access but nothing else
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
