@@ -210,10 +210,17 @@ bash deploy/nanobot/start_nanobot.sh up
 ### Using the `ssa` CLI wrapper
 
 ```bash
-scripts/ssa install    # install systemd services
-scripts/ssa up         # start all services
-scripts/ssa down       # stop all services
-scripts/ssa status     # check service states
+scripts/ssa install    # copy systemd units, enable ingest+api+watchdog at boot
+scripts/ssa up         # start nanobot stack
+scripts/ssa down       # stop nanobot stack
+scripts/ssa restart    # restart nanobot stack
+scripts/ssa status     # full systemd status for all three services
+scripts/ssa health     # operational summary: service states, API freshness, watchdog
+scripts/ssa watchdog   # run freshness check now, write logs/watchdog-status.json
+scripts/ssa deploy     # upgrade: stop → git pull → pip install → systemd reload → restart
+scripts/ssa rollback   # revert to pre-deploy commit (requires prior ssa deploy)
+scripts/ssa backup     # archive logs + threshold config + WhatsApp auth state
+scripts/ssa restore <file>  # restore from backup tarball
 scripts/ssa login      # WhatsApp QR code login
 ```
 

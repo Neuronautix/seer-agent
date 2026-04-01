@@ -9,8 +9,11 @@ API_PORT=8080
 
 WATCHDOG_STATUS_PATH="$ROOT_DIR/logs/watchdog-status.json"
 
+LAST_DEPLOY_FILE="$ROOT_DIR/.last-deploy-commit"
+BACKUP_DEFAULT_DIR="$ROOT_DIR/backups"
+
 usage() {
-  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|login|bridge|gateway}" >&2
+  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|deploy|rollback|backup|restore|login|bridge|gateway}" >&2
 }
 
 print_started_message() {
@@ -38,7 +41,127 @@ case "$COMMAND" in
     target="${1:-/usr/local/bin/ssa}"
     sudo ln -sf "$ROOT_DIR/scripts/ssa" "$target"
     sudo chmod +x "$ROOT_DIR/scripts/ssa"
-    echo "Installed $target -> $ROOT_DIR/scripts/ssa"
+    echo "Installed: $target -> $ROOT_DIR/scripts/ssa"
+
+    echo "Installing systemd units..."
+    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
+    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+
+    # Best-effort network dependency enablement
+    sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
+    sudo systemctl enable systemd-networkd-wait-online.service 2>/dev/null || true
+
+    # Enable ingest + api + watchdog timer at boot; nanobot stays manual
+    sudo systemctl enable sovereign-sensor-ingest.service sovereign-sensor-api.service
+    sudo systemctl enable sovereign-sensor-watchdog.timer
+
+    echo ""
+    echo "Enabled at boot: ingest, api, watchdog.timer"
+    echo "Nanobot is NOT enabled at boot (start manually: ssa up)"
+    echo "To start immediately: sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service"
+    ;;
+  deploy|upgrade)
+    echo "=== Deploying Sovereign Sensor Agent ==="
+
+    # Save current HEAD so rollback can restore it
+    git -C "$ROOT_DIR" rev-parse HEAD > "$LAST_DEPLOY_FILE"
+    echo "Saved pre-deploy commit: $(cat "$LAST_DEPLOY_FILE")"
+
+    echo "Stopping ingest and API..."
+    sudo systemctl stop sovereign-sensor-ingest.service sovereign-sensor-api.service 2>/dev/null || true
+
+    echo "Pulling latest code..."
+    git -C "$ROOT_DIR" pull
+
+    echo "Updating Python dependencies..."
+    "$PYTHON_BIN" -m pip install -q -r "$ROOT_DIR/requirements.txt"
+
+    echo "Updating systemd units..."
+    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
+    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+
+    echo "Restarting ingest and API..."
+    sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service
+
+    echo ""
+    echo "Deploy complete. Run 'ssa health' to verify."
+    echo "To rollback: ssa rollback"
+    ;;
+  rollback)
+    if [[ ! -f "$LAST_DEPLOY_FILE" ]]; then
+      echo "No pre-deploy commit found at $LAST_DEPLOY_FILE" >&2
+      echo "Run 'ssa deploy' at least once before using rollback." >&2
+      exit 1
+    fi
+
+    PREV_COMMIT=$(cat "$LAST_DEPLOY_FILE")
+    echo "=== Rolling back to $PREV_COMMIT ==="
+
+    echo "Stopping ingest and API..."
+    sudo systemctl stop sovereign-sensor-ingest.service sovereign-sensor-api.service 2>/dev/null || true
+
+    echo "Resetting code to pre-deploy commit..."
+    git -C "$ROOT_DIR" reset --hard "$PREV_COMMIT"
+
+    echo "Restoring Python dependencies..."
+    "$PYTHON_BIN" -m pip install -q -r "$ROOT_DIR/requirements.txt"
+
+    echo "Reloading systemd units..."
+    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
+    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+
+    echo "Restarting ingest and API..."
+    sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service
+
+    # Remove the saved commit so a second rollback doesn't loop
+    rm -f "$LAST_DEPLOY_FILE"
+
+    echo ""
+    echo "Rollback complete. Run 'ssa health' to verify."
+    ;;
+  backup)
+    BACKUP_DIR="${1:-$BACKUP_DEFAULT_DIR}"
+    mkdir -p "$BACKUP_DIR"
+    TS=$(date -u +%Y%m%dT%H%M%SZ)
+    BACKUP_FILE="$BACKUP_DIR/ssa-backup-$TS.tar.gz"
+
+    ITEMS=()
+    [[ -d "$ROOT_DIR/logs" ]] && ITEMS+=("logs/")
+    [[ -f "$ROOT_DIR/threshold-config.json" ]] && ITEMS+=("threshold-config.json")
+    [[ -d "$ROOT_DIR/deploy/nanobot/auth_info_multidevice" ]] && ITEMS+=("deploy/nanobot/auth_info_multidevice/")
+
+    if [[ ${#ITEMS[@]} -eq 0 ]]; then
+      echo "Nothing to back up (no logs or runtime state found)." >&2
+      exit 1
+    fi
+
+    tar -czf "$BACKUP_FILE" -C "$ROOT_DIR" "${ITEMS[@]}"
+    echo "Backup saved: $BACKUP_FILE"
+    echo "Contents: ${ITEMS[*]}"
+    ;;
+  restore)
+    BACKUP_FILE="${1:-}"
+    if [[ -z "$BACKUP_FILE" ]] || [[ ! -f "$BACKUP_FILE" ]]; then
+      echo "Usage: ssa restore <backup-file.tar.gz>" >&2
+      exit 1
+    fi
+
+    echo "=== Restoring from $BACKUP_FILE ==="
+
+    echo "Stopping ingest and API..."
+    sudo systemctl stop sovereign-sensor-ingest.service sovereign-sensor-api.service 2>/dev/null || true
+
+    echo "Extracting backup..."
+    tar -xzf "$BACKUP_FILE" -C "$ROOT_DIR"
+
+    echo "Restarting ingest and API..."
+    sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service
+
+    echo ""
+    echo "Restore complete. Run 'ssa health' to verify."
     ;;
   up|start)
     sudo systemctl start "$STACK_SERVICE"
@@ -67,15 +190,17 @@ case "$COMMAND" in
     echo ""
 
     # API freshness via /health endpoint
-    health_json=$("$PYTHON_BIN" - "$API_PORT" <<'PY' 2>/dev/null || echo '{"ok":false,"error":"API unreachable on port '$API_PORT'"}')
+    health_json=$(
+      "$PYTHON_BIN" -c '
 import json, sys, urllib.request
 port = int(sys.argv[1])
 try:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+    with urllib.request.urlopen("http://127.0.0.1:%d/health" % port, timeout=2) as r:
         sys.stdout.write(r.read().decode())
 except Exception as e:
     sys.stdout.write(json.dumps({"ok": False, "error": str(e)}))
-PY
+' "$API_PORT" 2>/dev/null || echo '{"ok":false,"error":"API unreachable"}'
+    )
     if "$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); sys.exit(0 if d.get('ok') else 1)" <<< "$health_json" 2>/dev/null; then
       status_val=$("$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('status','unknown'))" <<< "$health_json" 2>/dev/null || echo "unknown")
       observed_at=$("$PYTHON_BIN" -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('lastObservationAt','n/a'))" <<< "$health_json" 2>/dev/null || echo "n/a")
