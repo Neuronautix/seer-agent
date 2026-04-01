@@ -8,9 +8,13 @@ Requires=sovereign-sensor-api.service
 Type=simple
 User=dhuzard
 WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/dhuzard/sovereign-sensor-agent/deploy/nanobot/start_nanobot.sh up
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
