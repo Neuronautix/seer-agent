@@ -15,6 +15,10 @@ RestartSec=5
 TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
+# Security: Nanobot is network-facing; must never touch serial devices
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
