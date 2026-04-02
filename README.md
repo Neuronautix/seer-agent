@@ -551,6 +551,42 @@ What does not exist yet:
 
 To connect a real provider, you still need to expose the local service through a tunnel, reverse proxy, or hosted deployment, then configure the provider to call `POST /webhook`.
 
+## What You Can Ask via WhatsApp
+
+This system is **read-only**. The agent answers sensor questions — it cannot create tasks, set reminders, write data, or take any action outside the list below.
+
+**Messages must start with `@ssa` or the agent will stay silent.** This is intentional: any message that does not begin with `@ssa` is ignored.
+
+### Supported queries
+
+```
+@ssa what is the temperature?
+@ssa what is the humidity?
+@ssa what is the pressure?
+@ssa what is the threshold status?
+@ssa summarize last 10 readings
+@ssa summarize last 30 minutes
+```
+
+### Admin threshold commands (password required)
+
+```
+@ssa 8888 thresholds
+@ssa 8888 set temp 30
+@ssa 8888 set temp critical 35
+```
+
+### What the agent cannot do
+
+- Create or track tasks, reminders, or to-dos
+- Write to sensor logs or modify observations
+- Control hardware or trigger actions on the Pi
+- Answer questions about topics outside sensor data
+
+If you ask for something outside the supported queries, the agent will either give the closest safe read-only answer or stay silent.
+
+---
+
 ## WhatsApp Quick Start
 
 The repository supports a local WhatsApp test path through Nanobot's WhatsApp Web bridge. This is separate from the bare `POST /webhook` endpoint and is the documented way to link a WhatsApp account on the Raspberry Pi.
@@ -773,6 +809,55 @@ groups
 ### API says latest observation is missing
 
 Run the ingestion script first so validated data is written to `logs/latest-observation.json`.
+
+### No reply from WhatsApp
+
+Work through this checklist in order:
+
+**1. Does the message start with `@ssa`?**
+The agent silently ignores every message that does not begin with `@ssa`. This is by design.
+
+```
+@ssa temperature          ← answered
+temperature               ← silently ignored
+```
+
+**2. Is Nanobot running?**
+Nanobot is not started automatically. Start it manually:
+
+```bash
+ssa up
+ssa status                # should show sovereign-sensor-nanobot active
+```
+
+**3. Is the WhatsApp bridge connected?**
+
+```bash
+ssa status
+sudo journalctl -u sovereign-sensor-nanobot.service -n 50 --no-pager
+```
+
+If logs show `Connect call failed ('127.0.0.1', 3001)`, the bridge is not running. Start it:
+
+```bash
+ssa bridge
+```
+
+**4. Is your sender ID in the allowlist?**
+Check `NANOBOT_WHATSAPP_ALLOW_FROM` in `deploy/nanobot/nanobot.env`. The value must match your WhatsApp ID exactly. The gateway logs print the sender ID on each incoming message.
+
+**5. Is the ingest pipeline producing fresh data?**
+
+```bash
+ssa health
+curl -s http://127.0.0.1:8080/health
+```
+
+If `status` is `stale` or `waiting_for_data`, the ingest service is not running or the Arduino is not connected. Start ingest:
+
+```bash
+sudo systemctl start sovereign-sensor-ingest.service
+```
 
 ## License
 
