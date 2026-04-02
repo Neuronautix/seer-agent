@@ -64,6 +64,7 @@ class WhatsAppAlarmDaemon:
         self.state_path = Path(os.environ.get("SSA_ALERT_STATE_FILE", DEFAULT_STATE_PATH))
         self.chat_registry_path = Path(os.environ.get("SSA_CHAT_REGISTRY_FILE", DEFAULT_CHAT_REGISTRY_PATH))
         self.poll_interval = float(os.environ.get("SSA_ALERT_POLL_INTERVAL", "2.0"))
+        self.alarm_repeat_interval = float(os.environ.get("SSA_ALARM_REPEAT_INTERVAL", "300"))
         self.state = _load_json_dict(self.state_path)
         self.chat_registry = _load_json_dict(self.chat_registry_path)
         self._connected = asyncio.Event()
@@ -284,18 +285,39 @@ class WhatsAppAlarmDaemon:
                             temperature = evaluation["thresholdStatus"].get("temperature", {})
                             current_status = str(temperature.get("status", "unavailable"))
                             previous_status = str(self.state.get("lastTemperatureStatus", "unavailable"))
+                            last_notified_at = self.state.get("lastAlarmNotifiedAt")  # float or None
+
+                            recipients = self._resolve_alert_recipients()
+                            message: str | None = None
 
                             if temperature.get("available") and temperature.get("alarm"):
-                                if previous_status not in {"warning", "critical"} or SEVERITY_RANK[current_status] > SEVERITY_RANK.get(previous_status, 0):
-                                    recipients = self._resolve_alert_recipients()
+                                now = time.time()
+                                secs_since_notify = (now - last_notified_at) if last_notified_at else None
+                                is_new_alarm = previous_status not in {"warning", "critical"}
+                                is_escalation = SEVERITY_RANK[current_status] > SEVERITY_RANK.get(previous_status, 0)
+                                is_repeat_due = secs_since_notify is not None and secs_since_notify >= self.alarm_repeat_interval
+
+                                if is_new_alarm or is_escalation or is_repeat_due:
+                                    prefix = "STILL ACTIVE — " if is_repeat_due and not is_new_alarm and not is_escalation else ""
                                     message = (
-                                        f"Temperature alarm: {temperature['value']} {temperature['unit']} "
+                                        f"{prefix}Temperature alarm: {temperature['value']} {temperature['unit']} "
                                         f"({current_status}) at {observed_at}. "
                                         f"Warning {temperature['thresholds']['warningMax']} C, "
                                         f"critical {temperature['thresholds']['criticalMax']} C."
                                     )
-                                    for recipient in recipients:
-                                        await self.send_text(recipient, message)
+                                    self.state["lastAlarmNotifiedAt"] = now
+
+                            elif previous_status in {"warning", "critical"} and last_notified_at is not None:
+                                # Alarm just cleared
+                                message = (
+                                    f"Temperature back to normal: {temperature.get('value', '?')} "
+                                    f"{temperature.get('unit', 'C')} at {observed_at}."
+                                )
+                                self.state["lastAlarmNotifiedAt"] = None
+
+                            if message:
+                                for recipient in recipients:
+                                    await self.send_text(recipient, message)
 
                             self.state["lastObservedAt"] = observed_at
                             self.state["lastTemperatureStatus"] = current_status
