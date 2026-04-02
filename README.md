@@ -340,7 +340,20 @@ Returns a small service summary with the API status and a list of available endp
 
 ### `GET /health`
 
-Returns whether the API is up and whether a latest observation file exists.
+Returns API readiness and observation freshness.
+
+```json
+{
+  "ok": true,
+  "status": "ready",
+  "latestObservationAvailable": true,
+  "lastObservationAt": "2026-04-01T10:00:00Z",
+  "freshnessAgeSeconds": 42,
+  "isFresh": true
+}
+```
+
+`status` is `"ready"` when data is under 5 minutes old, `"stale"` when older, and `"waiting_for_data"` when no observation file exists yet.
 
 ### `GET /latest`
 
@@ -461,89 +474,50 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 ## Raspberry Pi Deployment With systemd
 
-For a durable Raspberry Pi setup, run the ingestion and API processes as systemd services.
-
-### Suggested service split
-
-- One service for `read_serial.py`.
-- One service for `api_server.py`.
-
-### Example ingestion service
-
-Create `/etc/systemd/system/sovereign-sensor-ingest.service`:
-
-```ini
-[Unit]
-Description=Sovereign Sensor Agent Serial Ingest
-After=network.target
-
-[Service]
-Type=simple
-User=dhuzard
-WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
-ExecStart=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Example API service
-
-Create `/etc/systemd/system/sovereign-sensor-api.service`:
-
-```ini
-[Unit]
-Description=Sovereign Sensor Agent API
-After=network.target sovereign-sensor-ingest.service
-Requires=sovereign-sensor-ingest.service
-
-[Service]
-Type=simple
-User=dhuzard
-WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
-ExecStart=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/api_server.py --host 0.0.0.0 --port 8080
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Enable and start the services
+Service files for all four units are provided in `deploy/systemd/`. Install and enable them in one command:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable sovereign-sensor-ingest.service
-sudo systemctl enable sovereign-sensor-api.service
-sudo systemctl start sovereign-sensor-ingest.service
-sudo systemctl start sovereign-sensor-api.service
+./scripts/ssa install
 ```
 
-Recommended default boot profile:
+This copies the service files to `/etc/systemd/system/`, runs `daemon-reload`, and enables the correct units at boot:
 
-- Keep ingest and API enabled at boot.
-- Keep the WhatsApp stack manual, so it only comes online when you explicitly start it.
+| Service | Boot behaviour |
+|---------|---------------|
+| `sovereign-sensor-ingest` | Enabled — starts automatically |
+| `sovereign-sensor-api` | Enabled — starts automatically |
+| `sovereign-sensor-watchdog.timer` | Enabled — freshness check every 5 min |
+| `sovereign-sensor-nanobot` | **Not** enabled — start manually with `ssa up` |
 
-Start the WhatsApp stack manually when needed:
+### ssa command reference
+
+`scripts/ssa` is the single entry point for all day-to-day operations.
 
 ```bash
-sudo systemctl start sovereign-sensor-nanobot.service
-sudo systemctl status sovereign-sensor-nanobot.service
-```
+ssa install              # first-time setup: copies service files, enables ingest+api+watchdog at boot
+ssa up                   # start the Nanobot/WhatsApp stack
+ssa down                 # stop the Nanobot/WhatsApp stack
+ssa restart              # restart the Nanobot/WhatsApp stack
+ssa status               # full systemd status for all three services
 
-Stop it when you no longer need the WhatsApp or Nanobot layer:
+ssa health               # operational summary: service states, API freshness, watchdog result
+ssa watchdog             # run a one-shot freshness check, writes logs/watchdog-status.json
 
-```bash
-sudo systemctl stop sovereign-sensor-nanobot.service
+ssa deploy               # upgrade: stop → git pull → pip install → systemd reload → restart
+ssa rollback             # revert to the commit saved by the last ssa deploy
+ssa backup [dir]         # archive logs/, threshold-config.json, WhatsApp auth state
+ssa restore <file>       # restore from a backup tarball
+
+ssa login                # start WhatsApp QR-code login flow
+ssa bridge               # start the WhatsApp bridge process manually
+ssa gateway              # start the Nanobot gateway without the full WhatsApp stack
 ```
 
 ### Inspect service status and logs
 
 ```bash
-sudo systemctl status sovereign-sensor-ingest.service
-sudo systemctl status sovereign-sensor-api.service
+ssa status
+ssa health
 journalctl -u sovereign-sensor-ingest.service -f
 journalctl -u sovereign-sensor-api.service -f
 ```
@@ -636,14 +610,14 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 Scan the QR code for WhatsApp Web. If you leave that process running after login, it already acts as the active bridge process.
 
-### 5. Install the short Raspberry Pi command
+### 5. Install the ssa command and systemd services
 
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
 ./scripts/ssa install
 ```
 
-That installs `/usr/local/bin/ssa` as a wrapper around the local deployment scripts and systemd service.
+This installs `/usr/local/bin/ssa`, copies all service and timer files to `/etc/systemd/system/`, and enables ingest, API, and the freshness watchdog timer at boot. See the [ssa command reference](#ssa-command-reference) for the full list of available commands.
 
 ### 6. Start the WhatsApp stack with one command
 
@@ -758,13 +732,10 @@ Recommended publication approach:
 - Add rolling summaries over the last `N` observations.
 - Add retention or rotation policy for logs.
 - Add richer threshold configuration with per-device overrides.
-- Add better observability: health checks, metrics, and startup diagnostics.
 - Add integration tests that exercise ingest plus API in one end-to-end flow.
 
 ### Long-Term TODO
 
-- Package the service for repeatable deployment on new Raspberry Pi devices.
-- Define and implement a solid Pod-style deployment package. See `SOLID_POD_IMPLEMENTATION.md`.
 - Support multiple sensor devices and multiple named sources.
 - Add authenticated dashboard or lightweight UI.
 - Add provider adapters for Twilio or Meta WhatsApp.
