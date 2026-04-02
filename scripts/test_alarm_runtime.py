@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from alarm_runtime import handle_admin_message, strip_whatsapp_prefix
+from alarm_runtime import _parse_time_duration, handle_admin_message, strip_whatsapp_prefix
 from observation_analysis import load_config
 from deploy.nanobot.whatsapp_alarm_daemon import WhatsAppAlarmDaemon
 
@@ -73,6 +73,84 @@ class AlarmRuntimeTests(unittest.TestCase):
                 daemon = WhatsAppAlarmDaemon()
 
             self.assertEqual(daemon._resolve_alert_recipients(), ["170639184896160@lid"])
+
+
+class ParseTimeDurationTests(unittest.TestCase):
+    def test_hours(self) -> None:
+        self.assertEqual(_parse_time_duration("1h"), 60)
+        self.assertEqual(_parse_time_duration("2h"), 120)
+        self.assertEqual(_parse_time_duration("2H"), 120)
+
+    def test_minutes(self) -> None:
+        self.assertEqual(_parse_time_duration("30m"), 30)
+        self.assertEqual(_parse_time_duration("90m"), 90)
+
+    def test_fractional_hours(self) -> None:
+        self.assertEqual(_parse_time_duration("1.5h"), 90)
+
+    def test_invalid_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            _parse_time_duration("xyz")
+        with self.assertRaises(ValueError):
+            _parse_time_duration("1")
+
+
+class TempHistoryCommandTests(unittest.TestCase):
+    def test_text_history_1h(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp last 1h")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "temp_history")
+        self.assertEqual(response["since_minutes"], 60)
+        self.assertEqual(response["bucket_minutes"], 5)
+        self.assertFalse(response["plot"])
+
+    def test_text_history_30m(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp last 30m")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "temp_history")
+        self.assertEqual(response["since_minutes"], 30)
+        self.assertFalse(response["plot"])
+
+    def test_plot_history_2h(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp plot last 2h")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "temp_history")
+        self.assertEqual(response["since_minutes"], 120)
+        self.assertTrue(response["plot"])
+
+    def test_plot_history_30m(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp plot last 30m")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "temp_history")
+        self.assertEqual(response["since_minutes"], 30)
+        self.assertTrue(response["plot"])
+
+    def test_history_invalid_duration_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            handle_admin_message("@ssa 8888 temp last xyz")
+
+    def test_history_missing_duration_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            handle_admin_message("@ssa 8888 temp last")
+
+    def test_existing_threshold_set_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "threshold-config.json"
+            response = handle_admin_message("@ssa 8888 set temp 30", config_path=config_path)
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertEqual(response["action"], "update_thresholds")
+
+    def test_help_includes_history_commands(self) -> None:
+        response = handle_admin_message("@ssa 8888 help")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertIn("temp last", response["reply"])
+        self.assertIn("temp plot last", response["reply"])
 
 
 if __name__ == "__main__":

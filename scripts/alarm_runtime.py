@@ -14,6 +14,8 @@ WHATSAPP_PREFIX = "@ssa"
 TEMPERATURE_ALIASES = {"temp", "temperature"}
 SHOW_KEYWORDS = {"show", "list", "status", "thresholds", "alarms"}
 UPDATE_KEYWORDS = {"set", "update", "change"}
+HISTORY_KEYWORDS = {"last", "history", "since"}
+DEFAULT_HISTORY_BUCKET_MINUTES = 5
 
 
 def get_admin_password() -> str:
@@ -116,6 +118,53 @@ def update_temperature_threshold(
     return config, adjustments
 
 
+def _parse_time_duration(token: str) -> int:
+    """Parse a duration token like '1h', '30m', '2h' into minutes."""
+    t = token.lower().strip()
+    if t.endswith("h"):
+        try:
+            return max(1, int(round(float(t[:-1]) * 60)))
+        except ValueError:
+            pass
+    elif t.endswith("m"):
+        try:
+            return max(1, int(t[:-1]))
+        except ValueError:
+            pass
+    raise ValueError(
+        f"Time duration must be like '1h', '30m', or '2h'. Got: '{token}'"
+    )
+
+
+def _handle_temp_history(tokens: list[str]) -> dict[str, Any]:
+    """Parse 'last 1h', 'plot last 30m', etc. and return a temp_history action dict."""
+    remaining = tokens
+    plot = False
+
+    if remaining and remaining[0].lower() == "plot":
+        plot = True
+        remaining = remaining[1:]
+
+    if not remaining or remaining[0].lower() not in HISTORY_KEYWORDS:
+        raise ValueError(
+            "Use @ssa 8888 temp last 1h or @ssa 8888 temp plot last 30m."
+        )
+    remaining = remaining[1:]  # skip 'last' / 'history' / 'since'
+
+    if not remaining:
+        raise ValueError("Specify a time range like 1h or 30m.")
+
+    since_minutes = _parse_time_duration(remaining[0])
+
+    return {
+        "ok": True,
+        "action": "temp_history",
+        "since_minutes": since_minutes,
+        "bucket_minutes": DEFAULT_HISTORY_BUCKET_MINUTES,
+        "plot": plot,
+    }
+
+
 def handle_admin_message(
     message_text: str,
     *,
@@ -144,7 +193,11 @@ def handle_admin_message(
         return {
             "ok": True,
             "action": "admin_help",
-            "reply": "Admin commands: @ssa 8888 thresholds, @ssa 8888 set temp 30, @ssa 8888 set temp critical 35.",
+            "reply": (
+                "Admin commands: @ssa 8888 thresholds, @ssa 8888 set temp 30, "
+                "@ssa 8888 set temp critical 35, @ssa 8888 temp last 1h, "
+                "@ssa 8888 temp plot last 30m."
+            ),
         }
 
     config = load_config(config_path)
@@ -178,6 +231,10 @@ def handle_admin_message(
             "reply": format_temperature_thresholds(config),
             "data": _config_thresholds_only(config),
         }
+
+    # History query: "temp last 1h", "temp plot last 30m", etc.
+    if lowered[1] in HISTORY_KEYWORDS or lowered[1] == "plot":
+        return _handle_temp_history(lowered[1:])
 
     threshold_key, value, trailing = _parse_temperature_update(lowered[1:])
     if trailing:

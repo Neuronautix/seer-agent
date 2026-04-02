@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -22,6 +23,7 @@ from alarm_runtime import handle_admin_message, strip_whatsapp_prefix
 from observation_analysis import SEVERITY_RANK, evaluate_thresholds, load_config
 
 DEFAULT_LATEST_PATH = ROOT_DIR / "logs" / "latest-observation.json"
+DEFAULT_OBSERVATIONS_PATH = ROOT_DIR / "logs" / "validated-observations.jsonl"
 DEFAULT_STATE_PATH = ROOT_DIR / "logs" / "whatsapp-alert-state.json"
 DEFAULT_CHAT_REGISTRY_PATH = ROOT_DIR / "logs" / "whatsapp-chat-registry.json"
 
@@ -58,6 +60,7 @@ class WhatsAppAlarmDaemon:
         self.alert_targets = self._parse_id_list(alert_targets_raw)
         self.config_path = Path(os.environ.get("SSA_THRESHOLD_CONFIG", ROOT_DIR / "threshold-config.json"))
         self.latest_path = Path(os.environ.get("SSA_LATEST_OBSERVATION", DEFAULT_LATEST_PATH))
+        self.observations_path = Path(os.environ.get("SSA_OBSERVATIONS_LOG", DEFAULT_OBSERVATIONS_PATH))
         self.state_path = Path(os.environ.get("SSA_ALERT_STATE_FILE", DEFAULT_STATE_PATH))
         self.chat_registry_path = Path(os.environ.get("SSA_CHAT_REGISTRY_FILE", DEFAULT_CHAT_REGISTRY_PATH))
         self.poll_interval = float(os.environ.get("SSA_ALERT_POLL_INTERVAL", "2.0"))
@@ -140,6 +143,66 @@ class WhatsAppAlarmDaemon:
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
         return True
 
+    async def send_image(self, chat_id: str, image_path: Path, caption: str = "") -> bool:
+        """Send a PNG image via the WhatsApp bridge as a base64-encoded payload.
+
+        The bridge must support {"type": "send", "to": ..., "image": <base64>, "caption": ...}.
+        Returns False if not connected or the bridge does not acknowledge.
+        """
+        if not self._connected.is_set() or self._ws is None:
+            return False
+
+        image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        payload: dict[str, Any] = {"type": "send", "to": chat_id, "image": image_data}
+        if caption:
+            payload["caption"] = caption
+
+        async with self._send_lock:
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        return True
+
+    async def _send_temp_history(self, chat_id: str, action_data: dict[str, Any]) -> None:
+        """Fetch bucketed temperature observations and send them as text or a plot."""
+        from observation_analysis import bucket_observations, load_config, read_observations_in_window
+        from temperature_report import format_temperature_table, generate_temperature_plot
+
+        since_minutes: int = int(action_data.get("since_minutes", 60))
+        bucket_minutes: int = int(action_data.get("bucket_minutes", 5))
+        want_plot: bool = bool(action_data.get("plot", False))
+
+        try:
+            observations = read_observations_in_window(self.observations_path, since_minutes)
+            bucketed = bucket_observations(observations, bucket_minutes)
+            config = load_config(self.config_path)
+        except (FileNotFoundError, ValueError) as exc:
+            await self.send_text(chat_id, f"No data available: {exc}")
+            return
+        except Exception as exc:
+            print(f"whatsapp alarm daemon temp history load error: {exc}", file=sys.stderr, flush=True)
+            await self.send_text(chat_id, "Error retrieving temperature history.")
+            return
+
+        if want_plot:
+            try:
+                plot_path = generate_temperature_plot(bucketed, config, since_minutes)
+                caption = f"Temperature last {since_minutes}min ({bucket_minutes}-min buckets)"
+                sent = await self.send_image(chat_id, plot_path, caption)
+                try:
+                    plot_path.unlink()
+                except OSError:
+                    pass
+                if not sent:
+                    # Bridge may not support images — fall back to text
+                    text = format_temperature_table(bucketed, config, since_minutes)
+                    await self.send_text(chat_id, text)
+            except Exception as exc:
+                print(f"whatsapp alarm daemon plot error: {exc}", file=sys.stderr, flush=True)
+                text = format_temperature_table(bucketed, config, since_minutes)
+                await self.send_text(chat_id, text)
+        else:
+            text = format_temperature_table(bucketed, config, since_minutes)
+            await self.send_text(chat_id, text)
+
     async def handle_inbound_message(self, data: dict[str, Any]) -> None:
         sender = str(data.get("sender", ""))
         content = str(data.get("content", "")).strip()
@@ -178,6 +241,10 @@ class WhatsAppAlarmDaemon:
             return
 
         if response is None:
+            return
+
+        if response.get("action") == "temp_history":
+            await self._send_temp_history(sender, response)
             return
 
         reply = response.get("reply")
