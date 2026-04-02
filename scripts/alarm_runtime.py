@@ -119,9 +119,19 @@ def update_temperature_threshold(
 
 
 def _parse_time_duration(token: str) -> int:
-    """Parse a duration token like '1h', '30m', '2h' into minutes."""
+    """Parse a duration token like '1h', '30m', '2d', '1w' into minutes."""
     t = token.lower().strip()
-    if t.endswith("h"):
+    if t.endswith("w"):
+        try:
+            return max(1, int(round(float(t[:-1]) * 7 * 24 * 60)))
+        except ValueError:
+            pass
+    elif t.endswith("d"):
+        try:
+            return max(1, int(round(float(t[:-1]) * 24 * 60)))
+        except ValueError:
+            pass
+    elif t.endswith("h"):
         try:
             return max(1, int(round(float(t[:-1]) * 60)))
         except ValueError:
@@ -132,7 +142,7 @@ def _parse_time_duration(token: str) -> int:
         except ValueError:
             pass
     raise ValueError(
-        f"Time duration must be like '1h', '30m', or '2h'. Got: '{token}'"
+        f"Time duration must be like '30m', '1h', '2d', or '1w'. Got: '{token}'"
     )
 
 

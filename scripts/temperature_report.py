@@ -30,9 +30,22 @@ def format_temperature_table(
     from observation_analysis import metric_status
 
     temp_config = config["thresholds"]["temperature"]
+
+    if since_minutes >= 7 * 24 * 60:
+        window_label = f"{since_minutes // (7 * 24 * 60)}w"
+    elif since_minutes >= 24 * 60:
+        window_label = f"{since_minutes // (24 * 60)}d"
+    elif since_minutes >= 60:
+        window_label = f"{since_minutes // 60}h"
+    else:
+        window_label = f"{since_minutes}min"
+
     lines: list[str] = [
-        f"Temp history (last {since_minutes}min, {BUCKET_MINUTES}-min buckets):"
+        f"Temp history (last {window_label}, {BUCKET_MINUTES}-min buckets):"
     ]
+
+    # Use date+time format when window spans more than 24 h
+    ts_format = "%m-%d %H:%M" if since_minutes > 24 * 60 else "%H:%M"
 
     values: list[float] = []
     for obs in bucketed_observations:
@@ -45,7 +58,7 @@ def format_temperature_table(
         values.append(value)
         status = metric_status(value, temp_config)
         marker = "" if status == "normal" else f" [{status.upper()}]"
-        lines.append(f"{dt.strftime('%H:%M')}  {value:.1f}C{marker}")
+        lines.append(f"{dt.strftime(ts_format)}  {value:.1f}C{marker}")
 
     if values:
         avg = sum(values) / len(values)
@@ -107,9 +120,26 @@ def generate_temperature_plot(
 
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Temperature (°C)")
-    ax.set_title(f"Temperature — last {since_minutes} min ({BUCKET_MINUTES}-min buckets)")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-    fig.autofmt_xdate()
+
+    # Human-readable window label for the title
+    if since_minutes >= 7 * 24 * 60:
+        window_label = f"{since_minutes // (7 * 24 * 60)}w"
+    elif since_minutes >= 24 * 60:
+        window_label = f"{since_minutes // (24 * 60)}d"
+    elif since_minutes >= 60:
+        window_label = f"{since_minutes // 60}h"
+    else:
+        window_label = f"{since_minutes}min"
+
+    ax.set_title(f"Temperature — last {window_label} ({BUCKET_MINUTES}-min buckets)")
+
+    # Adaptive x-axis format: show date+hour for ranges longer than 24 h
+    if since_minutes > 24 * 60:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    fig.autofmt_xdate(rotation=45)
     ax.set_ylim(y_min, y_max)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper left")

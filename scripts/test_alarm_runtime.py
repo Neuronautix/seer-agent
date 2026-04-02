@@ -88,6 +88,14 @@ class ParseTimeDurationTests(unittest.TestCase):
     def test_fractional_hours(self) -> None:
         self.assertEqual(_parse_time_duration("1.5h"), 90)
 
+    def test_days(self) -> None:
+        self.assertEqual(_parse_time_duration("1d"), 24 * 60)
+        self.assertEqual(_parse_time_duration("3d"), 3 * 24 * 60)
+
+    def test_weeks(self) -> None:
+        self.assertEqual(_parse_time_duration("1w"), 7 * 24 * 60)
+        self.assertEqual(_parse_time_duration("2W"), 2 * 7 * 24 * 60)
+
     def test_invalid_raises(self) -> None:
         with self.assertRaises(ValueError):
             _parse_time_duration("xyz")
@@ -128,6 +136,28 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertEqual(response["action"], "temp_history")
         self.assertEqual(response["since_minutes"], 30)
         self.assertTrue(response["plot"])
+
+    def test_text_history_1w(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp last 1w")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "temp_history")
+        self.assertEqual(response["since_minutes"], 7 * 24 * 60)
+        self.assertFalse(response["plot"])
+
+    def test_plot_history_1w(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp plot last 1w")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "temp_history")
+        self.assertEqual(response["since_minutes"], 7 * 24 * 60)
+        self.assertTrue(response["plot"])
+
+    def test_text_history_3d(self) -> None:
+        response = handle_admin_message("@ssa 8888 temp last 3d")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["since_minutes"], 3 * 24 * 60)
 
     def test_history_invalid_duration_raises(self) -> None:
         with self.assertRaises(ValueError):
