@@ -13,7 +13,7 @@ LAST_DEPLOY_FILE="$ROOT_DIR/.last-deploy-commit"
 BACKUP_DEFAULT_DIR="$ROOT_DIR/backups"
 
 usage() {
-  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|deploy|rollback|backup|restore|login|bridge|gateway}" >&2
+  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|deploy|rollback|backup|restore|login|tasks-login|bridge|gateway}" >&2
 }
 
 print_started_message() {
@@ -231,6 +231,9 @@ except Exception as e:
     ;;
   login|link)
     exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-login "$@"
+    ;;
+  tasks-login|gtasks-login)
+    exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" gtasks-login "$@"
     ;;
   bridge)
     exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-bridge "$@"

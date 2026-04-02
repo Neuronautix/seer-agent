@@ -509,6 +509,7 @@ ssa backup [dir]         # archive logs/, threshold-config.json, WhatsApp auth s
 ssa restore <file>       # restore from a backup tarball
 
 ssa login                # start WhatsApp QR-code login flow
+ssa tasks-login          # run Google Tasks OAuth login flow
 ssa bridge               # start the WhatsApp bridge process manually
 ssa gateway              # start the Nanobot gateway without the full WhatsApp stack
 ```
@@ -553,7 +554,7 @@ To connect a real provider, you still need to expose the local service through a
 
 ## What You Can Ask via WhatsApp
 
-This system is **read-only**. The agent answers sensor questions — it cannot create tasks, set reminders, write data, or take any action outside the list below.
+This system is sensor-read-only, with optional Google Tasks actions. Sensor data stays read-only; task management runs through a separate Google Tasks MCP server.
 
 **Messages must start with `@ssa` or the agent will stay silent.** This is intentional: any message that does not begin with `@ssa` is ignored.
 
@@ -568,6 +569,14 @@ This system is **read-only**. The agent answers sensor questions — it cannot c
 @ssa summarize last 30 minutes
 ```
 
+### Supported Google Tasks commands (when `NANOBOT_ENABLE_GOOGLE_TASKS=true`)
+
+```
+@ssa add task buy filters tomorrow 09:00
+@ssa list tasks
+@ssa complete task TASK_ID
+```
+
 ### Admin threshold commands (password required)
 
 ```
@@ -578,10 +587,10 @@ This system is **read-only**. The agent answers sensor questions — it cannot c
 
 ### What the agent cannot do
 
-- Create or track tasks, reminders, or to-dos
 - Write to sensor logs or modify observations
 - Control hardware or trigger actions on the Pi
 - Answer questions about topics outside sensor data
+- Perform arbitrary writes outside Google Tasks list/create/complete
 
 If you ask for something outside the supported queries, the agent will either give the closest safe read-only answer or stay silent.
 
@@ -617,6 +626,12 @@ NANOBOT_WHATSAPP_BRIDGE_URL=ws://localhost:3001
 NANOBOT_WHATSAPP_BRIDGE_TOKEN=
 SSA_ADMIN_PASSWORD=8888
 SSA_WHATSAPP_ALERT_TO=REPLACE_WITH_YOUR_WHATSAPP_ID
+NANOBOT_ENABLE_GOOGLE_TASKS=false
+GOOGLE_TASKS_CLIENT_SECRET_FILE=
+GOOGLE_TASKS_TOKEN_FILE=
+GOOGLE_TASKS_OAUTH_PORT=8765
+GOOGLE_CHAT_WEBHOOK_URL=
+GOOGLE_CHAT_TIMEOUT_SECONDS=5
 ```
 
 Guidance:
@@ -627,8 +642,20 @@ Guidance:
 - Set `NANOBOT_WHATSAPP_SELF_CHAT_ONLY=true` if you want to deny all other chats during testing.
 - `SSA_ADMIN_PASSWORD` defaults to `8888`; keep it set explicitly in the env file so the command path is obvious.
 - `SSA_WHATSAPP_ALERT_TO` is the direct chat that receives automatic temperature alarm messages. It can match `NANOBOT_WHATSAPP_ALLOW_FROM`.
+- Set `NANOBOT_ENABLE_GOOGLE_TASKS=true` to allow task commands from WhatsApp.
+- Set `GOOGLE_TASKS_CLIENT_SECRET_FILE` to your local OAuth client JSON path, then run `ssa tasks-login`.
+- `GOOGLE_CHAT_WEBHOOK_URL` is optional; when set, task create/complete events are posted to Google Chat.
 
-### 3. Verify the read-only tool layer before linking WhatsApp
+### 3. Optional: complete Google Tasks OAuth
+
+```bash
+cd /home/dhuzard/sovereign-sensor-agent
+ssa tasks-login
+```
+
+This opens a local OAuth flow and writes the token used by the Google Tasks MCP server.
+
+### 4. Verify the read-only tool layer before linking WhatsApp
 
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
@@ -637,7 +664,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 Do this first so you know the agent can answer from validated sensor files before you add the messaging layer.
 
-### 4. Link the WhatsApp account
+### 5. Link the WhatsApp account
 
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
@@ -646,7 +673,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 Scan the QR code for WhatsApp Web. If you leave that process running after login, it already acts as the active bridge process.
 
-### 5. Install the ssa command and systemd services
+### 6. Install the ssa command and systemd services
 
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
@@ -655,7 +682,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 This installs `/usr/local/bin/ssa`, copies all service and timer files to `/etc/systemd/system/`, and enables ingest, API, and the freshness watchdog timer at boot. See the [ssa command reference](#ssa-command-reference) for the full list of available commands.
 
-### 6. Start the WhatsApp stack with one command
+### 7. Start the WhatsApp stack with one command
 
 ```bash
 ssa up
@@ -663,7 +690,7 @@ ssa up
 
 That service now brings up the WhatsApp bridge, the deterministic admin-and-alert daemon, and the Nanobot gateway together.
 
-### 7. Start the bridge manually only if you are troubleshooting
+### 8. Start the bridge manually only if you are troubleshooting
 
 ```bash
 cd /home/dhuzard/sovereign-sensor-agent
@@ -672,7 +699,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 
 The bridge listens locally on `ws://127.0.0.1:3001`.
 
-### 8. Administrative WhatsApp commands
+### 9. Administrative WhatsApp commands
 
 Nanobot and the deterministic admin daemon now answer only to WhatsApp messages that start with `@ssa`.
 
@@ -684,19 +711,21 @@ Send one of these messages from an allowed WhatsApp chat:
 
 Those commands update `threshold-config.json` directly. They do not go through the model.
 
-Normal read-only sensor questions must also start with `@ssa`, for example:
+Normal sensor questions and task commands must also start with `@ssa`, for example:
 
 - `@ssa temperature`
 - `@ssa what is the current humidity?`
 - `@ssa what is the threshold status?`
+- `@ssa add task change air filter tomorrow 09:00`
+- `@ssa list tasks`
 
 If the message does not start with `@ssa`, the deployment is expected to stay silent.
 
-### 9. Automatic temperature alarm messages
+### 10. Automatic temperature alarm messages
 
 When temperature crosses into the configured warning or critical state, the WhatsApp daemon sends an outbound message to `SSA_WHATSAPP_ALERT_TO`.
 
-### 10. Start the Nanobot gateway manually if you do not want the systemd wrapper
+### 11. Start the Nanobot gateway manually if you do not want the systemd wrapper
 
 In another terminal:
 
@@ -705,7 +734,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh gateway
 ```
 
-### 11. Test end to end
+### 12. Test end to end
 
 Send a WhatsApp message from an allowed sender such as:
 
@@ -713,10 +742,13 @@ Send a WhatsApp message from an allowed sender such as:
 - `@ssa what is the current humidity?`
 - `@ssa what is the current pressure?`
 - `@ssa what is the threshold status?`
+- `@ssa add task buy replacement sensor cable`
+- `@ssa list tasks`
 
 Expected behavior:
 
 - Nanobot answers briefly using the read-only sensor tools.
+- Task commands are routed to Google Tasks when enabled and OAuth is configured.
 - Replies come from validated local data, not from the serial device directly.
 - Pressure may be reported as unavailable if the connected sensor does not emit it.
 - Group chats remain quiet unless the linked account is mentioned when `NANOBOT_WHATSAPP_GROUP_POLICY=mention`.

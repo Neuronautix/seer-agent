@@ -3,10 +3,11 @@
 This project treats the deterministic sensor pipeline as the only source of truth.
 
 Rules:
-- The LLM may emit only these intents: `read_latest`, `summarize_window`, `get_threshold_status`, `request_export`, `propose_annotation`.
+- The LLM may emit only these intents: `read_latest`, `summarize_window`, `get_threshold_status`, `list_tasks`, `create_task`, `complete_task`, `request_export`, `propose_annotation`.
 - The LLM must never generate canonical observation JSON-LD.
 - The LLM must never write directly to logs, schemas, Pod resources, local storage, or external repositories.
 - Nanobot live-environment queries may only use read-only tools that read validated local files.
+- Task writes are allowed only through the dedicated Google Tasks MCP tool surface.
 - Nanobot must never read `/dev/tty*` devices or any direct serial source.
 - The LLM must never bypass schema validation or supervisor checks.
 - Any non-read-only action must be returned as a proposal object only.
@@ -19,3 +20,4 @@ Enforcement:
 - Execution authority stays in Python control logic, not in the LLM.
 - Allowed Nanobot tool inputs: validated local files such as `logs/latest-observation.json` and `logs/validated-observations.jsonl`.
 - Supported live metrics are `temperature`, `humidity`, and `pressure`.
+- Supported Google Tasks actions are list/create/complete only.

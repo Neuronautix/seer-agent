@@ -11,6 +11,8 @@ LOG_DIR="$ROOT_DIR/logs"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 NANOBOT_BIN="$ROOT_DIR/.venv/bin/nanobot"
 MCP_SERVER="$DEPLOY_DIR/mcp_server.py"
+GTASKS_MCP_SERVER="$DEPLOY_DIR/gtasks_mcp_server.py"
+GTASKS_OAUTH_SCRIPT="$DEPLOY_DIR/gtasks_oauth.py"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -118,6 +120,19 @@ validate_whatsapp_config() {
   fi
 }
 
+validate_gtasks_config() {
+  if [[ "${NANOBOT_ENABLE_GOOGLE_TASKS:-false}" != "true" ]]; then
+    return
+  fi
+
+  local token_file="${GOOGLE_TASKS_TOKEN_FILE:-$DEPLOY_DIR/google-tasks-token.json}"
+  if [[ ! -f "$token_file" ]]; then
+    echo "Google Tasks is enabled but token file is missing: $token_file" >&2
+    echo "Run: $0 gtasks-login (with GOOGLE_TASKS_CLIENT_SECRET_FILE set in deploy/nanobot/nanobot.env)" >&2
+    exit 1
+  fi
+}
+
 render_whatsapp_config() {
   local enabled="false"
   local allow_self_messages="false"
@@ -161,8 +176,32 @@ render_whatsapp_config() {
 JSON
 }
 
+render_gtasks_server_config() {
+  if [[ "${NANOBOT_ENABLE_GOOGLE_TASKS:-false}" != "true" ]]; then
+    return
+  fi
+
+  cat <<JSON
+      ,
+      "gtasks": {
+        "type": "stdio",
+        "command": "$PYTHON_BIN",
+        "args": [
+          "$GTASKS_MCP_SERVER"
+        ],
+        "toolTimeout": 30,
+        "enabledTools": [
+          "list_tasks",
+          "create_task",
+          "complete_task"
+        ]
+      }
+JSON
+}
+
 render_config() {
   validate_whatsapp_config
+  validate_gtasks_config
   cat > "$CONFIG_PATH" <<JSON
 {
   "agents": {
@@ -215,6 +254,7 @@ $(render_whatsapp_config)
           "summarize_window"
         ]
       }
+$(render_gtasks_server_config)
     }
   }
 }
@@ -251,6 +291,9 @@ case "$COMMAND" in
     render_config
     exec "$PYTHON_BIN" "$DEPLOY_DIR/whatsapp_login.py" "$CONFIG_PATH" "$@"
     ;;
+  gtasks-login|google-tasks-login)
+    exec "$PYTHON_BIN" "$GTASKS_OAUTH_SCRIPT" "$@"
+    ;;
   up|stack)
     run_whatsapp_stack "$@"
     ;;
@@ -266,7 +309,7 @@ case "$COMMAND" in
     cat "$CONFIG_PATH"
     ;;
   *)
-    echo "Usage: $0 {render-config|gateway|whatsapp-bridge|whatsapp-login|up|stack|agent|status} [nanobot args...]" >&2
+    echo "Usage: $0 {render-config|gateway|whatsapp-bridge|whatsapp-login|gtasks-login|up|stack|agent|status} [nanobot args...]" >&2
     exit 2
     ;;
 esac
