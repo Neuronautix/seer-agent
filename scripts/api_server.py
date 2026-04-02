@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from alarm_runtime import handle_admin_message
-from observation_analysis import evaluate_thresholds, load_config, read_observations_in_window, read_recent_observations, summarize_window
+from observation_analysis import bucket_observations, evaluate_thresholds, load_config, read_observations_in_window, read_recent_observations, summarize_window
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LATEST_PATH = SCRIPT_DIR.parent / "logs" / "latest-observation.json"
@@ -22,6 +22,22 @@ METRICS = {
     "temperature": {"field": "temperatureC", "unit": "C"},
     "humidity": {"field": "humidityPct", "unit": "%"},
     "pressure": {"field": "pressureHpa", "unit": "hPa"},
+}
+
+# CORS headers sent with every response so browsers and third-party apps can
+# call this API without a proxy.
+_CORS_HEADERS = [
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+    ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+    ("Access-Control-Max-Age", "86400"),
+]
+
+HISTORY_FIELDS: dict[str, set[str]] = {
+    "all": {"temperatureC", "humidityPct", "pressureHpa"},
+    "temperature": {"temperatureC"},
+    "humidity": {"humidityPct"},
+    "pressure": {"pressureHpa"},
 }
 
 def load_latest_observation(latest_path: Path) -> dict[str, Any]:
@@ -73,6 +89,7 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
         "status": build_health_payload(latest_path)["status"],
         "endpoints": [
             "/health",
+            "/config/thresholds",
             "/latest",
             "/latest/temp",
             "/latest/humidity",
@@ -80,7 +97,8 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
             "/latest/threshold-status",
             "/latest/alarm-status",
             "/summary?count=10&subject=all",
-            "/summary?since_minutes=30&bucket_minutes=1&subject=temperature",
+            "/summary?since_minutes=30&bucket_minutes=5&subject=temperature",
+            "/history?since_minutes=60&bucket_minutes=5&subject=all",
             "/webhook",
         ],
     }
@@ -172,6 +190,51 @@ def build_summary_payload(
         }
     )
     return payload
+
+
+def build_history_payload(
+    log_path: Path,
+    since_minutes: int,
+    bucket_minutes: int,
+    subject: str,
+    config_path: Path | None,
+) -> dict[str, Any]:
+    if subject not in HISTORY_FIELDS:
+        raise ValueError("subject must be all, temperature, humidity, or pressure")
+    if since_minutes < 1:
+        raise ValueError("since_minutes must be at least 1")
+    if bucket_minutes < 1:
+        raise ValueError("bucket_minutes must be at least 1")
+
+    observations = read_observations_in_window(log_path, since_minutes=since_minutes)
+    bucketed = bucket_observations(observations, bucket_minutes)
+
+    fields = HISTORY_FIELDS[subject]
+    points: list[dict[str, Any]] = []
+    for obs in bucketed:
+        point: dict[str, Any] = {"observedAt": obs.get("observedAt")}
+        for field in ("temperatureC", "humidityPct", "pressureHpa"):
+            if field in fields and obs.get(field) is not None:
+                point[field] = obs[field]
+        points.append(point)
+
+    last = bucketed[-1] if bucketed else {}
+    return {
+        "ok": True,
+        "action": "get_history",
+        "window": {
+            "sinceMinutes": since_minutes,
+            "bucketMinutes": bucket_minutes,
+            "observedFrom": bucketed[0].get("observedAt") if bucketed else None,
+            "observedTo": last.get("observedAt"),
+            "pointCount": len(points),
+        },
+        "subject": subject,
+        "sensorId": last.get("sensorId"),
+        "sourcePort": last.get("sourcePort"),
+        "schemaVersion": last.get("schemaVersion"),
+        "points": points,
+    }
 
 
 def extract_message_text(body: bytes, content_type: str) -> str:
@@ -321,10 +384,19 @@ def route_request(
             bucket_minutes=bucket_minutes,
         )
 
+    if parsed.path == "/history":
+        params = parse_qs(parsed.query, keep_blank_values=False)
+        since_minutes = int(params.get("since_minutes", ["60"])[0])
+        bucket_minutes = int(params.get("bucket_minutes", ["5"])[0])
+        subject = params.get("subject", ["all"])[0].strip().lower()
+        return HTTPStatus.OK, build_history_payload(
+            log_path, since_minutes, bucket_minutes, subject, config_path
+        )
+
     observation = load_latest_observation(latest_path)
 
     if parsed.path == "/latest":
-        return HTTPStatus.OK, observation
+        return HTTPStatus.OK, {"ok": True, "action": "get_latest", **observation}
     if parsed.path == "/latest/temp":
         return HTTPStatus.OK, build_metric_payload(observation, "temperature", "temperatureC", "C")
     if parsed.path == "/latest/humidity":
@@ -398,19 +470,29 @@ def make_handler(
     active_log_path = log_path or DEFAULT_LOG_PATH
 
     class ApiHandler(BaseHTTPRequestHandler):
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            for header, value in _CORS_HEADERS:
+                self.send_header(header, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(HTTPStatus.NO_CONTENT)
+            for header, value in _CORS_HEADERS:
+                self.send_header(header, value)
+            self.end_headers()
+
         def do_GET(self) -> None:
             try:
                 status, payload = route_request(self.path, latest_path, active_log_path, config_path)
             except (FileNotFoundError, ValueError) as exc:
                 status = HTTPStatus.SERVICE_UNAVAILABLE
                 payload = {"ok": False, "error": str(exc)}
-
-            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(status, payload)
 
         def do_POST(self) -> None:
             if self.path != "/webhook":
@@ -426,13 +508,7 @@ def make_handler(
             except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
                 status = HTTPStatus.BAD_REQUEST
                 payload = {"ok": False, "error": str(exc)}
-
-            response = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
+            self._send_json(status, payload)
 
         def do_PUT(self) -> None:
             self._method_not_allowed()
@@ -444,12 +520,7 @@ def make_handler(
             return
 
         def _method_not_allowed(self) -> None:
-            body = json.dumps({"ok": False, "error": "read-only API"}, separators=(",", ":")).encode("utf-8")
-            self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"ok": False, "error": "read-only API"})
 
     return ApiHandler
 

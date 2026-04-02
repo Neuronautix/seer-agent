@@ -610,6 +610,106 @@ class PipelineTests(unittest.TestCase):
                 thread.join(timeout=2)
 
 
+class TestApiHistoryAndCors(unittest.TestCase):
+    """Tests for /history endpoint, CORS headers, and /latest envelope."""
+
+    _OBSERVATION = {
+        "@context": {"@vocab": "https://sovereign-sensor-agent.local/ontology#"},
+        "@type": "SensorObservation",
+        "schemaVersion": "sensor-observation-v1",
+        "sensorId": "arduino-ttyACM0",
+        "sourcePort": "/dev/ttyACM0",
+        "observedAt": "2026-04-02T12:00:00Z",
+        "temperatureC": 23.4,
+        "humidityPct": 51.2,
+        "pressureHpa": 1008.7,
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._latest_path = tmp / "latest-observation.json"
+        self._log_path = tmp / "obs.jsonl"
+        self._latest_path.write_text(json.dumps(self._OBSERVATION), encoding="utf-8")
+        self._log_path.write_text(json.dumps(self._OBSERVATION) + "\n", encoding="utf-8")
+        self._server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self._latest_path, self._log_path),
+        )
+        thread = Thread(target=self._server.serve_forever, daemon=True)
+        thread.start()
+        self._base = f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._tmp.cleanup()
+
+    def _get(self, path: str):
+        return urllib.request.urlopen(f"{self._base}{path}")
+
+    def test_latest_response_has_ok_true(self) -> None:
+        payload = json.loads(self._get("/latest").read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "get_latest")
+        # Sensor fields still accessible at top level (backward compatible)
+        self.assertEqual(payload["temperatureC"], 23.4)
+        self.assertEqual(payload["pressureHpa"], 1008.7)
+
+    def test_history_endpoint_returns_points_array(self) -> None:
+        payload = json.loads(
+            self._get("/history?since_minutes=60&bucket_minutes=5&subject=all").read().decode("utf-8")
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "get_history")
+        self.assertIn("points", payload)
+        self.assertIsInstance(payload["points"], list)
+        self.assertGreater(payload["window"]["pointCount"], 0)
+        point = payload["points"][0]
+        self.assertIn("observedAt", point)
+        self.assertIn("temperatureC", point)
+        self.assertIn("humidityPct", point)
+
+    def test_history_subject_filter_excludes_other_fields(self) -> None:
+        payload = json.loads(
+            self._get("/history?since_minutes=60&bucket_minutes=5&subject=temperature").read().decode("utf-8")
+        )
+        self.assertEqual(payload["subject"], "temperature")
+        point = payload["points"][0]
+        self.assertIn("temperatureC", point)
+        self.assertNotIn("humidityPct", point)
+        self.assertNotIn("pressureHpa", point)
+
+    def test_history_default_params(self) -> None:
+        payload = json.loads(self._get("/history").read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["window"]["sinceMinutes"], 60)
+        self.assertEqual(payload["window"]["bucketMinutes"], 5)
+
+    def test_cors_header_present_on_get(self) -> None:
+        response = self._get("/health")
+        self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+        self.assertIn("GET", response.headers.get("Access-Control-Allow-Methods", ""))
+
+    def test_cors_options_preflight(self) -> None:
+        req = urllib.request.Request(f"{self._base}/latest", method="OPTIONS")
+        response = urllib.request.urlopen(req)
+        self.assertEqual(response.status, 204)
+        self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+
+    def test_root_endpoint_list_includes_history_and_config(self) -> None:
+        payload = json.loads(self._get("/").read().decode("utf-8"))
+        endpoints = payload["endpoints"]
+        self.assertTrue(any("/history" in ep for ep in endpoints))
+        self.assertTrue(any("/config/thresholds" in ep for ep in endpoints))
+
+    def test_content_type_includes_charset(self) -> None:
+        response = self._get("/health")
+        ct = response.headers.get("Content-Type", "")
+        self.assertIn("application/json", ct)
+        self.assertIn("charset=utf-8", ct)
+
+
 class TestBuildHealthPayload(unittest.TestCase):
     def test_returns_waiting_when_file_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
