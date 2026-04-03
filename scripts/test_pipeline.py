@@ -798,7 +798,7 @@ class TestNewApiEndpoints(unittest.TestCase):
         self._log.write_text(json.dumps(self._OBS) + "\n", encoding="utf-8")
         self._server = ThreadingHTTPServer(
             ("127.0.0.1", 0),
-            make_handler(self._latest, self._log),
+            make_handler(self._latest, self._log, rejected_path=self._rejected),
         )
         Thread(target=self._server.serve_forever, daemon=True).start()
         self._base = f"http://127.0.0.1:{self._server.server_address[1]}"
@@ -847,8 +847,19 @@ class TestNewApiEndpoints(unittest.TestCase):
     def test_diagnostics_rejected_returns_empty_when_no_file(self) -> None:
         payload = json.loads(self._get("/diagnostics/rejected").read().decode("utf-8"))
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["totalRejected"], 0)
+        self.assertEqual(payload["returnedCount"], 0)
         self.assertEqual(payload["entries"], [])
+
+    def test_diagnostics_rejected_uses_handler_rejected_path(self) -> None:
+        self._rejected.write_text(
+            '{"raw":"bad line","error":"invalid"}\n',
+            encoding="utf-8",
+        )
+        payload = json.loads(self._get("/diagnostics/rejected").read().decode("utf-8"))
+        self.assertEqual(payload["totalRejected"], 1)
+        self.assertEqual(payload["returnedCount"], 1)
+        self.assertEqual(payload["entries"][0]["error"], "invalid")
 
     def test_root_lists_new_endpoints(self) -> None:
         payload = json.loads(self._get("/").read().decode("utf-8"))
@@ -969,6 +980,23 @@ class TestCheckEnv(unittest.TestCase):
         with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "supersecret"}, clear=False):
             self.assertTrue(check_admin_password())
 
+    def test_run_checks_all_includes_service_specific_checks(self) -> None:
+        from check_env import run_checks
+        import unittest.mock as mock
+
+        calls: list[str] = []
+
+        with mock.patch("check_env.check_logs_dir", return_value=True), \
+             mock.patch("check_env.check_python_venv", return_value=True), \
+             mock.patch("check_env.check_threshold_config", return_value=True), \
+             mock.patch("check_env.check_admin_password", return_value=True), \
+             mock.patch("check_env.check_serial_device", side_effect=lambda: calls.append("serial") or True), \
+             mock.patch("check_env.check_gemini_api_key", side_effect=lambda: calls.append("gemini") or True), \
+             mock.patch("check_env.check_whatsapp_allow_from", side_effect=lambda: calls.append("allow") or True):
+            self.assertTrue(run_checks("all"))
+
+        self.assertEqual(calls, ["serial", "gemini", "allow"])
+
 
 class TestStatusCommand(unittest.TestCase):
     """Tests for @ssa 8888 status and @ssa 8888 health commands."""
@@ -993,13 +1021,32 @@ class TestStatusCommand(unittest.TestCase):
             response = handle_admin_message(
                 "@ssa 8888 status",
                 log_path=log,
+                latest_path=latest,
+                rejected_path=tmp_path / "rejected.jsonl",
             )
             self.assertIsNotNone(response)
             assert response is not None
             self.assertEqual(response["action"], "system_status")
             reply = response["reply"]
             self.assertIn("Status at", reply)
+            self.assertIn("arduino-test", reply)
             self.assertIn("Log:", reply)
+
+    def test_status_handles_non_object_latest_payload(self) -> None:
+        from alarm_runtime import handle_admin_message
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            latest = tmp_path / "latest.json"
+            latest.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+            response = handle_admin_message(
+                "@ssa 8888 status",
+                latest_path=latest,
+                log_path=tmp_path / "obs.jsonl",
+                rejected_path=tmp_path / "rejected.jsonl",
+            )
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertIn("invalid latest observation format", response["reply"])
 
     def test_health_alias_works(self) -> None:
         from alarm_runtime import handle_admin_message

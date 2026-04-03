@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-BUCKET_MINUTES = 5
-
 
 def _parse_dt(value: str) -> datetime:
     normalized = value.strip()
@@ -21,27 +19,31 @@ def _parse_dt(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _window_label(since_minutes: int) -> str:
+    if since_minutes >= 7 * 24 * 60:
+        return f"{since_minutes // (7 * 24 * 60)}w"
+    if since_minutes >= 24 * 60:
+        return f"{since_minutes // (24 * 60)}d"
+    if since_minutes >= 60:
+        return f"{since_minutes // 60}h"
+    return f"{since_minutes}min"
+
+
 def format_temperature_table(
     bucketed_observations: list[dict[str, Any]],
     config: dict[str, Any],
     since_minutes: int,
+    bucket_minutes: int,
 ) -> str:
     """Return a compact text table of bucketed temperature readings."""
     from observation_analysis import metric_status
 
     temp_config = config["thresholds"]["temperature"]
 
-    if since_minutes >= 7 * 24 * 60:
-        window_label = f"{since_minutes // (7 * 24 * 60)}w"
-    elif since_minutes >= 24 * 60:
-        window_label = f"{since_minutes // (24 * 60)}d"
-    elif since_minutes >= 60:
-        window_label = f"{since_minutes // 60}h"
-    else:
-        window_label = f"{since_minutes}min"
+    window_label = _window_label(since_minutes)
 
     lines: list[str] = [
-        f"Temp history (last {window_label}, {BUCKET_MINUTES}-min buckets):"
+        f"Temp history (last {window_label}, {bucket_minutes}-min buckets):"
     ]
 
     # Use date+time format when window spans more than 24 h
@@ -73,6 +75,7 @@ def generate_temperature_plot(
     bucketed_observations: list[dict[str, Any]],
     config: dict[str, Any],
     since_minutes: int,
+    bucket_minutes: int,
 ) -> Path:
     """Generate a temperature time-series PNG and return its temporary file path.
 
@@ -121,17 +124,8 @@ def generate_temperature_plot(
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Temperature (°C)")
 
-    # Human-readable window label for the title
-    if since_minutes >= 7 * 24 * 60:
-        window_label = f"{since_minutes // (7 * 24 * 60)}w"
-    elif since_minutes >= 24 * 60:
-        window_label = f"{since_minutes // (24 * 60)}d"
-    elif since_minutes >= 60:
-        window_label = f"{since_minutes // 60}h"
-    else:
-        window_label = f"{since_minutes}min"
-
-    ax.set_title(f"Temperature — last {window_label} ({BUCKET_MINUTES}-min buckets)")
+    window_label = _window_label(since_minutes)
+    ax.set_title(f"Temperature — last {window_label} ({bucket_minutes}-min buckets)")
 
     # Adaptive x-axis format: show date+hour for ranges longer than 24 h
     if since_minutes > 24 * 60:

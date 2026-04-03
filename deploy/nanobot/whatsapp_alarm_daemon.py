@@ -187,7 +187,12 @@ class WhatsAppAlarmDaemon:
 
         if want_plot:
             try:
-                plot_path = generate_temperature_plot(bucketed, config, since_minutes)
+                plot_path = generate_temperature_plot(
+                    bucketed,
+                    config,
+                    since_minutes,
+                    bucket_minutes,
+                )
                 caption = f"Temperature last {since_minutes}min ({bucket_minutes}-min buckets)"
                 sent = await self.send_image(chat_id, plot_path, caption)
                 try:
@@ -196,14 +201,14 @@ class WhatsAppAlarmDaemon:
                     pass
                 if not sent:
                     # Bridge may not support images — fall back to text
-                    text = format_temperature_table(bucketed, config, since_minutes)
+                    text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
                     await self.send_text(chat_id, text)
             except Exception as exc:
                 print(f"whatsapp alarm daemon plot error: {exc}", file=sys.stderr, flush=True)
-                text = format_temperature_table(bucketed, config, since_minutes)
+                text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
                 await self.send_text(chat_id, text)
         else:
-            text = format_temperature_table(bucketed, config, since_minutes)
+            text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
             await self.send_text(chat_id, text)
 
     async def handle_inbound_message(self, data: dict[str, Any]) -> None:
@@ -242,6 +247,8 @@ class WhatsAppAlarmDaemon:
                 content,
                 config_path=self.config_path,
                 log_path=self.observations_path,
+                latest_path=self.latest_path,
+                rejected_path=self.observations_path.parent / "rejected-lines.jsonl",
             )
         except ValueError as exc:
             await self.send_text(sender, str(exc))

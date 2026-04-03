@@ -137,10 +137,10 @@ def run_checks(service: str) -> bool:
     results.append(check_threshold_config())
     results.append(check_admin_password())
 
-    if service == "ingest":
+    if service in {"ingest", "all"}:
         results.append(check_serial_device())
 
-    if service == "nanobot":
+    if service in {"nanobot", "all"}:
         results.append(check_gemini_api_key())
         results.append(check_whatsapp_allow_from())
 

@@ -193,7 +193,7 @@ case "$COMMAND" in
   status)
     exec sudo systemctl --no-pager --full status sovereign-sensor-ingest.service sovereign-sensor-api.service "$STACK_SERVICE"
     ;;
-  health|check)
+  health)
     echo "=== Sovereign Sensor Agent Health ==="
     echo ""
 

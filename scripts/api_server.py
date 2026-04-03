@@ -54,18 +54,65 @@ _RATE_LIMIT_WINDOW = 10.0
 _RATE_LIMIT_MAX = 10
 _rate_limit_state: dict[str, deque] = {}
 _rate_limit_lock = threading.Lock()
+_OBS_COUNT_CACHE_TTL_SECONDS = 30.0
+_obs_count_cache: dict[str, tuple[int, int, int, float]] = {}
+
+
+def _prune_rate_limit_state(now: float) -> None:
+    cutoff = now - _RATE_LIMIT_WINDOW
+    for client_ip, timestamps in list(_rate_limit_state.items()):
+        while timestamps and timestamps[0] < cutoff:
+            timestamps.popleft()
+        if not timestamps:
+            _rate_limit_state.pop(client_ip, None)
 
 
 def _is_rate_limited(client_ip: str) -> bool:
     now = time.monotonic()
     with _rate_limit_lock:
+        _prune_rate_limit_state(now)
         timestamps = _rate_limit_state.setdefault(client_ip, deque())
-        while timestamps and timestamps[0] < now - _RATE_LIMIT_WINDOW:
-            timestamps.popleft()
         if len(timestamps) >= _RATE_LIMIT_MAX:
             return True
         timestamps.append(now)
         return False
+
+
+def _count_nonempty_lines_cached(log_path: Path) -> int:
+    if not log_path.exists():
+        _obs_count_cache.pop(str(log_path), None)
+        return 0
+
+    cache_key = str(log_path)
+    now = time.monotonic()
+    try:
+        stat = log_path.stat()
+    except OSError:
+        _obs_count_cache.pop(cache_key, None)
+        return 0
+
+    cached = _obs_count_cache.get(cache_key)
+    if cached is not None:
+        cached_mtime_ns, cached_size, cached_count, cached_at = cached
+        if (
+            cached_mtime_ns == stat.st_mtime_ns
+            and cached_size == stat.st_size
+            and now - cached_at <= _OBS_COUNT_CACHE_TTL_SECONDS
+        ):
+            return cached_count
+
+    count = 0
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.strip():
+                    count += 1
+    except OSError:
+        _obs_count_cache.pop(cache_key, None)
+        return 0
+
+    _obs_count_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, count, now)
+    return count
 
 def load_latest_observation(latest_path: Path) -> dict[str, Any]:
     if not latest_path.exists():
@@ -228,7 +275,6 @@ def build_history_payload(
     since_minutes: int,
     bucket_minutes: int,
     subject: str,
-    config_path: Path | None,
 ) -> dict[str, Any]:
     if subject not in HISTORY_FIELDS:
         raise ValueError("subject must be all, temperature, humidity, or pressure")
@@ -300,7 +346,7 @@ def build_metrics_text(latest_path: Path, log_path: Path) -> str:
         gauge("ssa_sensor_fresh", 0, "1 if latest observation is within freshness threshold")
         gauge("ssa_alarm_active", 0, "1 if any sensor metric is currently in an alarm state")
 
-    obs_count = sum(1 for ln in log_path.open("r", encoding="utf-8") if ln.strip()) if log_path.exists() else 0
+    obs_count = _count_nonempty_lines_cached(log_path)
     gauge("ssa_total_observations", obs_count, "Total validated observations stored")
 
     return "\n".join(lines) + "\n"
@@ -309,7 +355,13 @@ def build_metrics_text(latest_path: Path, log_path: Path) -> str:
 def build_rejected_payload(rejected_path: Path, tail: int) -> dict[str, Any]:
     """Return the last `tail` rejected lines with raw content and error info."""
     if not rejected_path.exists():
-        return {"ok": True, "action": "get_rejected", "count": 0, "entries": []}
+        return {
+            "ok": True,
+            "action": "get_rejected",
+            "totalRejected": 0,
+            "returnedCount": 0,
+            "entries": [],
+        }
 
     raw_lines: deque[str] = deque(maxlen=tail)
     total = 0
@@ -493,6 +545,7 @@ def route_request(
     path: str,
     latest_path: Path,
     log_path: Path,
+    rejected_path: Path,
     config_path: Path | None,
 ) -> tuple[int, dict[str, Any]]:
     parsed = urlparse(path)
@@ -525,14 +578,12 @@ def route_request(
         since_minutes = int(params.get("since_minutes", ["60"])[0])
         bucket_minutes = int(params.get("bucket_minutes", ["5"])[0])
         subject = params.get("subject", ["all"])[0].strip().lower()
-        return HTTPStatus.OK, build_history_payload(
-            log_path, since_minutes, bucket_minutes, subject, config_path
-        )
+        return HTTPStatus.OK, build_history_payload(log_path, since_minutes, bucket_minutes, subject)
 
     if parsed.path == "/diagnostics/rejected":
         params = parse_qs(parsed.query, keep_blank_values=False)
         tail = max(1, min(int(params.get("tail", ["50"])[0]), 500))
-        return HTTPStatus.OK, build_rejected_payload(DEFAULT_REJECTED_PATH, tail)
+        return HTTPStatus.OK, build_rejected_payload(rejected_path, tail)
 
     observation = load_latest_observation(latest_path)
 
@@ -557,10 +608,17 @@ def route_webhook(
     content_type: str,
     latest_path: Path,
     log_path: Path,
+    rejected_path: Path,
     config_path: Path | None,
 ) -> tuple[int, dict[str, Any]]:
     message_text = extract_message_text(body, content_type)
-    admin_response = handle_admin_message(message_text, config_path=config_path)
+    admin_response = handle_admin_message(
+        message_text,
+        config_path=config_path,
+        log_path=log_path,
+        latest_path=latest_path,
+        rejected_path=rejected_path,
+    )
     if admin_response is not None:
         return HTTPStatus.OK, admin_response
 
@@ -607,8 +665,10 @@ def make_handler(
     latest_path: Path,
     log_path: Path | None = None,
     config_path: Path | None = None,
+    rejected_path: Path | None = None,
 ):
     active_log_path = log_path or DEFAULT_LOG_PATH
+    active_rejected_path = rejected_path or (active_log_path.parent / DEFAULT_REJECTED_PATH.name)
 
     class ApiHandler(BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
@@ -673,7 +733,13 @@ def make_handler(
                 return
 
             try:
-                status, payload = route_request(self.path, latest_path, active_log_path, config_path)
+                status, payload = route_request(
+                    self.path,
+                    latest_path,
+                    active_log_path,
+                    active_rejected_path,
+                    config_path,
+                )
             except (FileNotFoundError, ValueError) as exc:
                 status = HTTPStatus.SERVICE_UNAVAILABLE
                 payload = {"ok": False, "error": str(exc)}
@@ -697,7 +763,14 @@ def make_handler(
             body = self.rfile.read(content_length)
 
             try:
-                status, payload = route_webhook(body, content_type, latest_path, active_log_path, config_path)
+                status, payload = route_webhook(
+                    body,
+                    content_type,
+                    latest_path,
+                    active_log_path,
+                    active_rejected_path,
+                    config_path,
+                )
             except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
                 status = HTTPStatus.BAD_REQUEST
                 payload = {"ok": False, "error": str(exc)}

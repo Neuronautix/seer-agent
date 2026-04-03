@@ -156,34 +156,36 @@ def _build_status_reply(
     if resolved_latest.exists():
         try:
             obs = json.loads(resolved_latest.read_text(encoding="utf-8"))
-            observed_at = str(obs.get("observedAt") or "")
-            sensor_id = str(obs.get("sensorId") or "unknown")
-            if observed_at:
-                last_dt = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-                age = int((now_utc - last_dt).total_seconds())
-                freshness = "fresh" if age <= 300 else "STALE"
-                lines.append(f"Sensor: {freshness} ({age}s ago) | {sensor_id}")
+            if not isinstance(obs, dict):
+                lines.append("Sensor: invalid latest observation format")
             else:
-                lines.append(f"Sensor: no timestamp | {sensor_id}")
+                observed_at = str(obs.get("observedAt") or "")
+                sensor_id = str(obs.get("sensorId") or "unknown")
+                if observed_at:
+                    last_dt = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                    age = int((now_utc - last_dt).total_seconds())
+                    freshness = "fresh" if age <= 300 else "STALE"
+                    lines.append(f"Sensor: {freshness} ({age}s ago) | {sensor_id}")
+                else:
+                    lines.append(f"Sensor: no timestamp | {sensor_id}")
 
-            # Threshold status
-            config = load_config(config_path)
-            ev = evaluate_thresholds(obs, config)
-            ts = ev["thresholdStatus"]
-            parts: list[str] = []
-            for metric, label, unit_suffix in (
-                ("temperature", "Temp", "°C"),
-                ("humidity", "Hum", "%"),
-                ("pressure", "Press", "hPa"),
-            ):
-                m = ts.get(metric, {})
-                if m.get("available"):
-                    status_flag = "" if m["status"] == "normal" else f" [{m['status'].upper()}]"
-                    parts.append(f"{label} {m['value']}{unit_suffix}{status_flag}")
-            if parts:
-                lines.append(" | ".join(parts))
-            alarms = ev.get("activeAlarms", [])
-            lines.append(f"Alarms: {'none' if not alarms else ', '.join(a['metric'] for a in alarms)}")
+                config = load_config(config_path)
+                ev = evaluate_thresholds(obs, config)
+                ts = ev["thresholdStatus"]
+                parts: list[str] = []
+                for metric, label, unit_suffix in (
+                    ("temperature", "Temp", "°C"),
+                    ("humidity", "Hum", "%"),
+                    ("pressure", "Press", "hPa"),
+                ):
+                    m = ts.get(metric, {})
+                    if m.get("available"):
+                        status_flag = "" if m["status"] == "normal" else f" [{m['status'].upper()}]"
+                        parts.append(f"{label} {m['value']}{unit_suffix}{status_flag}")
+                if parts:
+                    lines.append(" | ".join(parts))
+                alarms = ev.get("activeAlarms", [])
+                lines.append(f"Alarms: {'none' if not alarms else ', '.join(a['metric'] for a in alarms)}")
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             lines.append("Sensor: error reading latest observation")
     else:
@@ -259,6 +261,8 @@ def handle_admin_message(
     *,
     config_path: Path | None = None,
     log_path: Path | None = None,
+    latest_path: Path | None = None,
+    rejected_path: Path | None = None,
     password: str | None = None,
 ) -> dict[str, Any] | None:
     stripped = strip_whatsapp_prefix(message_text)
@@ -294,7 +298,12 @@ def handle_admin_message(
         return {
             "ok": True,
             "action": "system_status",
-            "reply": _build_status_reply(config_path, log_path=log_path),
+            "reply": _build_status_reply(
+                config_path,
+                log_path=log_path,
+                latest_path=latest_path,
+                rejected_path=rejected_path,
+            ),
         }
 
     config = load_config(config_path)

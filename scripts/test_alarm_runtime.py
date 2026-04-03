@@ -43,6 +43,56 @@ class AlarmRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Critical threshold cannot be below"):
                 handle_admin_message("@ssa 8888 set temp critical 20", config_path=config_path)
 
+    def test_status_uses_explicit_latest_and_rejected_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            latest_path = temp_path / "latest.json"
+            log_path = temp_path / "obs.jsonl"
+            rejected_path = temp_path / "rejected.jsonl"
+            latest_path.write_text(
+                json.dumps(
+                    {
+                        "@type": "SensorObservation",
+                        "sensorId": "custom-sensor",
+                        "observedAt": "2026-04-02T12:00:00Z",
+                        "temperatureC": 23.4,
+                        "humidityPct": 51.2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            log_path.write_text("{}\n{}\n", encoding="utf-8")
+            rejected_path.write_text("{}\n", encoding="utf-8")
+
+            response = handle_admin_message(
+                "@ssa 8888 status",
+                log_path=log_path,
+                latest_path=latest_path,
+                rejected_path=rejected_path,
+            )
+
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertIn("custom-sensor", response["reply"])
+            self.assertIn("2 observations | 1 rejected", response["reply"])
+
+    def test_status_handles_non_object_latest_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            latest_path = temp_path / "latest.json"
+            latest_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+            response = handle_admin_message(
+                "@ssa 8888 status",
+                latest_path=latest_path,
+                log_path=temp_path / "obs.jsonl",
+                rejected_path=temp_path / "rejected.jsonl",
+            )
+
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertIn("invalid latest observation format", response["reply"])
+
     def test_alarm_daemon_does_not_fallback_to_allow_from_for_alert_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

@@ -116,7 +116,6 @@ def rotate(
         date_key = dt.strftime("%Y-%m-%d") if dt else "undated"
         by_date[date_key].append(obs)
 
-    archived_count = 0
     if not dry_run and by_date:
         archive_dir.mkdir(parents=True, exist_ok=True)
         for date_key, entries in sorted(by_date.items()):
@@ -125,7 +124,6 @@ def rotate(
             with gzip.open(gz_path, mode) as gz:
                 for obs in entries:
                     gz.write((json.dumps(obs, separators=(",", ":")) + "\n").encode("utf-8"))
-            archived_count += len(entries)
 
     # Rewrite main JSONL with recent + thinned data
     kept = recent + thinned
