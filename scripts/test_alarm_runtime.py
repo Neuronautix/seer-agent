@@ -460,6 +460,28 @@ class TempHistoryDeliveryTests(unittest.TestCase):
         ]
         log_path.write_text("\n".join(json.dumps(obs) for obs in observations) + "\n", encoding="utf-8")
 
+    def test_send_image_uses_bridge_send_media_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = self._make_daemon(tmp_path)
+            daemon._ws = MagicMock(send=AsyncMock())
+            plot_path = tmp_path / "plot.png"
+            plot_path.write_bytes(b"png")
+
+            sent = asyncio.get_event_loop().run_until_complete(
+                daemon.send_image("170639184896160@lid", plot_path, "Temperature last 60min")
+            )
+
+            self.assertTrue(sent)
+            daemon._ws.send.assert_awaited_once()
+            payload = json.loads(daemon._ws.send.await_args.args[0])
+            self.assertEqual(payload["type"], "send_media")
+            self.assertEqual(payload["to"], "170639184896160@lid")
+            self.assertEqual(payload["filePath"], str(plot_path))
+            self.assertEqual(payload["mimetype"], "image/png")
+            self.assertEqual(payload["fileName"], "plot.png")
+            self.assertEqual(payload["caption"], "Temperature last 60min")
+
     def test_plot_history_sends_text_when_image_send_reports_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

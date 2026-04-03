@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
+import mimetypes
 import os
 import sys
 import time
@@ -72,6 +72,7 @@ class WhatsAppAlarmDaemon:
         self._connected = asyncio.Event()
         self._send_lock = asyncio.Lock()
         self._recent_outbound_echoes: OrderedDict[str, float] = OrderedDict()
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._ws: Any = None
 
     @staticmethod
@@ -146,17 +147,31 @@ class WhatsAppAlarmDaemon:
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
         return True
 
-    async def send_image(self, chat_id: str, image_path: Path, caption: str = "") -> bool:
-        """Send a PNG image via the WhatsApp bridge as a base64-encoded payload.
+    async def _delete_file_after_delay(self, path: Path, delay_seconds: float) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
-        The bridge must support {"type": "send", "to": ..., "image": <base64>, "caption": ...}.
-        Returns False if not connected or the bridge does not acknowledge.
-        """
+    def _schedule_file_cleanup(self, path: Path, delay_seconds: float = 30.0) -> None:
+        task = asyncio.create_task(self._delete_file_after_delay(path, delay_seconds))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
+    async def send_image(self, chat_id: str, image_path: Path, caption: str = "") -> bool:
+        """Send an image via the WhatsApp bridge using Nanobot's send_media command."""
         if not self._connected.is_set() or self._ws is None:
             return False
 
-        image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        payload: dict[str, Any] = {"type": "send", "to": chat_id, "image": image_data}
+        mime_type, _ = mimetypes.guess_type(str(image_path))
+        payload: dict[str, Any] = {
+            "type": "send_media",
+            "to": chat_id,
+            "filePath": str(image_path),
+            "mimetype": mime_type or "application/octet-stream",
+            "fileName": image_path.name,
+        }
         if caption:
             payload["caption"] = caption
 
@@ -188,6 +203,7 @@ class WhatsAppAlarmDaemon:
         text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
 
         if want_plot:
+            plot_path: Path | None = None
             try:
                 plot_path = generate_temperature_plot(
                     bucketed,
@@ -197,20 +213,29 @@ class WhatsAppAlarmDaemon:
                 )
                 caption = f"Temperature last {since_minutes}min ({bucket_minutes}-min buckets)"
                 sent = await self.send_image(chat_id, plot_path, caption)
-                try:
-                    plot_path.unlink()
-                except OSError:
-                    pass
                 if not sent:
+                    try:
+                        plot_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                     # Bridge may not support images — fall back to text
                     await self.send_text(chat_id, text)
                     return
+
+                # Keep the temp file around briefly so the Node bridge has time
+                # to read it after receiving the send_media command.
+                self._schedule_file_cleanup(plot_path)
 
                 # Also send a text summary so users still get the data if media
                 # delivery is flaky or unsupported by the current bridge path.
                 await self.send_text(chat_id, text)
             except Exception as exc:
                 print(f"whatsapp alarm daemon plot error: {exc}", file=sys.stderr, flush=True)
+                if plot_path is not None:
+                    try:
+                        plot_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 await self.send_text(chat_id, text)
         else:
             await self.send_text(chat_id, text)
