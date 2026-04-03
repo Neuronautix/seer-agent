@@ -7,6 +7,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -413,6 +414,87 @@ class TempHistoryCommandTests(unittest.TestCase):
         assert response is not None
         self.assertIn("temp last", response["reply"])
         self.assertIn("temp plot last", response["reply"])
+
+    def test_help_uses_current_admin_password(self) -> None:
+        with patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "8989"}, clear=False):
+            response = handle_admin_message("@ssa 8989 help")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertIn("@ssa 8989 status", response["reply"])
+        self.assertNotIn("@ssa 8888 status", response["reply"])
+
+
+class TempHistoryDeliveryTests(unittest.TestCase):
+    def _make_daemon(self, tmp_path: Path) -> WhatsAppAlarmDaemon:
+        with patch.dict(
+            "os.environ",
+            {
+                "SSA_CHAT_REGISTRY_FILE": str(tmp_path / "registry.json"),
+                "SSA_ALERT_STATE_FILE": str(tmp_path / "state.json"),
+                "SSA_LATEST_OBSERVATION": str(tmp_path / "latest.json"),
+                "SSA_OBSERVATIONS_LOG": str(tmp_path / "obs.jsonl"),
+                "SSA_THRESHOLD_CONFIG": str(tmp_path / "threshold.json"),
+            },
+            clear=False,
+        ):
+            daemon = WhatsAppAlarmDaemon()
+        daemon._connected.set()
+        daemon._ws = MagicMock()
+        return daemon
+
+    def _write_recent_observations(self, log_path: Path) -> None:
+        now = datetime.now(tz=timezone.utc)
+        observations = [
+            {
+                "@type": "SensorObservation",
+                "temperatureC": 21.5,
+                "humidityPct": 50.0,
+                "observedAt": (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+            {
+                "@type": "SensorObservation",
+                "temperatureC": 22.0,
+                "humidityPct": 51.0,
+                "observedAt": (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        ]
+        log_path.write_text("\n".join(json.dumps(obs) for obs in observations) + "\n", encoding="utf-8")
+
+    def test_plot_history_sends_text_when_image_send_reports_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = self._make_daemon(tmp_path)
+            self._write_recent_observations(tmp_path / "obs.jsonl")
+            daemon.send_image = AsyncMock(return_value=False)
+            daemon.send_text = AsyncMock(return_value=True)
+
+            with patch("temperature_report.generate_temperature_plot", return_value=tmp_path / "plot.png"):
+                (tmp_path / "plot.png").write_bytes(b"png")
+                asyncio.get_event_loop().run_until_complete(
+                    daemon._send_temp_history("chat", {"since_minutes": 60, "bucket_minutes": 5, "plot": True})
+                )
+
+            daemon.send_image.assert_called_once()
+            daemon.send_text.assert_called_once()
+            self.assertIn("Temp history", daemon.send_text.call_args[0][1])
+
+    def test_plot_history_also_sends_text_after_image_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = self._make_daemon(tmp_path)
+            self._write_recent_observations(tmp_path / "obs.jsonl")
+            daemon.send_image = AsyncMock(return_value=True)
+            daemon.send_text = AsyncMock(return_value=True)
+
+            with patch("temperature_report.generate_temperature_plot", return_value=tmp_path / "plot.png"):
+                (tmp_path / "plot.png").write_bytes(b"png")
+                asyncio.get_event_loop().run_until_complete(
+                    daemon._send_temp_history("chat", {"since_minutes": 60, "bucket_minutes": 5, "plot": True})
+                )
+
+            daemon.send_image.assert_called_once()
+            daemon.send_text.assert_called_once()
+            self.assertIn("Temp history", daemon.send_text.call_args[0][1])
 
 
 if __name__ == "__main__":

@@ -185,6 +185,8 @@ class WhatsAppAlarmDaemon:
             await self.send_text(chat_id, "Error retrieving temperature history.")
             return
 
+        text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
+
         if want_plot:
             try:
                 plot_path = generate_temperature_plot(
@@ -201,14 +203,16 @@ class WhatsAppAlarmDaemon:
                     pass
                 if not sent:
                     # Bridge may not support images — fall back to text
-                    text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
                     await self.send_text(chat_id, text)
+                    return
+
+                # Also send a text summary so users still get the data if media
+                # delivery is flaky or unsupported by the current bridge path.
+                await self.send_text(chat_id, text)
             except Exception as exc:
                 print(f"whatsapp alarm daemon plot error: {exc}", file=sys.stderr, flush=True)
-                text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
                 await self.send_text(chat_id, text)
         else:
-            text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
             await self.send_text(chat_id, text)
 
     async def handle_inbound_message(self, data: dict[str, Any]) -> None:
