@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,7 @@ class WhatsAppAlarmDaemon:
         self.chat_registry_path = Path(os.environ.get("SSA_CHAT_REGISTRY_FILE", DEFAULT_CHAT_REGISTRY_PATH))
         self.poll_interval = float(os.environ.get("SSA_ALERT_POLL_INTERVAL", "2.0"))
         self.alarm_repeat_interval = float(os.environ.get("SSA_ALARM_REPEAT_INTERVAL", "300"))
+        self.offline_threshold_seconds = float(os.environ.get("SSA_OFFLINE_THRESHOLD_MINUTES", "10")) * 60
         self.state = _load_json_dict(self.state_path)
         self.chat_registry = _load_json_dict(self.chat_registry_path)
         self._connected = asyncio.Event()
@@ -236,7 +238,11 @@ class WhatsAppAlarmDaemon:
             return
 
         try:
-            response = handle_admin_message(content, config_path=self.config_path)
+            response = handle_admin_message(
+                content,
+                config_path=self.config_path,
+                log_path=self.observations_path,
+            )
         except ValueError as exc:
             await self.send_text(sender, str(exc))
             return
@@ -321,7 +327,36 @@ class WhatsAppAlarmDaemon:
 
                             self.state["lastObservedAt"] = observed_at
                             self.state["lastTemperatureStatus"] = current_status
+                            # If we were previously flagged as offline, the sensor is back
+                            if self.state.get("lastOfflineNotifiedAt") is not None:
+                                self.state["lastOfflineNotifiedAt"] = None
+                                recovery_msg = f"Sensor back online: reading at {observed_at}."
+                                for recipient in self._resolve_alert_recipients():
+                                    await self.send_text(recipient, recovery_msg)
                             _save_json(self.state_path, self.state)
+
+                # Offline check — runs every poll cycle regardless of new data
+                last_obs_at = self.state.get("lastObservedAt")
+                if last_obs_at:
+                    try:
+                        last_dt = datetime.fromisoformat(last_obs_at.replace("Z", "+00:00"))
+                        silence_secs = (datetime.now(tz=timezone.utc) - last_dt).total_seconds()
+                        last_offline_at = self.state.get("lastOfflineNotifiedAt")
+                        if silence_secs > self.offline_threshold_seconds:
+                            now = time.time()
+                            repeat_due = last_offline_at is None or (now - last_offline_at) >= self.alarm_repeat_interval
+                            if repeat_due:
+                                silence_min = int(silence_secs // 60)
+                                offline_msg = (
+                                    f"Sensor offline: no new reading since {last_obs_at} "
+                                    f"({silence_min} min ago)."
+                                )
+                                for recipient in self._resolve_alert_recipients():
+                                    await self.send_text(recipient, offline_msg)
+                                self.state["lastOfflineNotifiedAt"] = now
+                                _save_json(self.state_path, self.state)
+                    except (ValueError, OSError):
+                        pass
             except Exception as exc:
                 print(f"whatsapp alarm daemon alert error: {exc}", file=sys.stderr, flush=True)
 

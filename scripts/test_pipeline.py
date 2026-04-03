@@ -773,5 +773,248 @@ class TestBuildHealthPayload(unittest.TestCase):
             self.assertNotIn("freshnessAgeSeconds", result)
 
 
+class TestNewApiEndpoints(unittest.TestCase):
+    """Tests for /metrics, /export, /diagnostics/rejected, and webhook rate limiting."""
+
+    _OBS = {
+        "@context": {"@vocab": "https://sovereign-sensor-agent.local/ontology#"},
+        "@type": "SensorObservation",
+        "schemaVersion": "sensor-observation-v1",
+        "sensorId": "arduino-ttyACM0",
+        "sourcePort": "/dev/ttyACM0",
+        "observedAt": "2026-04-02T12:00:00Z",
+        "temperatureC": 23.4,
+        "humidityPct": 51.2,
+        "pressureHpa": 1008.7,
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._latest = tmp / "latest.json"
+        self._log = tmp / "obs.jsonl"
+        self._rejected = tmp / "rejected.jsonl"
+        self._latest.write_text(json.dumps(self._OBS), encoding="utf-8")
+        self._log.write_text(json.dumps(self._OBS) + "\n", encoding="utf-8")
+        self._server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self._latest, self._log),
+        )
+        Thread(target=self._server.serve_forever, daemon=True).start()
+        self._base = f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._tmp.cleanup()
+
+    def _get(self, path: str):
+        return urllib.request.urlopen(f"{self._base}{path}")
+
+    def test_metrics_endpoint_returns_prometheus_text(self) -> None:
+        resp = self._get("/metrics")
+        ct = resp.headers.get("Content-Type", "")
+        self.assertIn("text/plain", ct)
+        body = resp.read().decode("utf-8")
+        self.assertIn("ssa_temperature_celsius 23.4", body)
+        self.assertIn("ssa_humidity_percent 51.2", body)
+        self.assertIn("ssa_alarm_active", body)
+        self.assertIn("# HELP", body)
+        self.assertIn("# TYPE", body)
+
+    def test_export_csv_returns_valid_csv(self) -> None:
+        resp = self._get("/export?since_minutes=60&format=csv&subject=all")
+        ct = resp.headers.get("Content-Type", "")
+        cd = resp.headers.get("Content-Disposition", "")
+        self.assertIn("text/csv", ct)
+        self.assertIn("attachment", cd)
+        self.assertIn(".csv", cd)
+        body = resp.read().decode("utf-8")
+        self.assertIn("observedAt", body)
+        self.assertIn("temperatureC", body)
+        self.assertIn("23.4", body)
+
+    def test_export_jsonl_returns_newline_delimited_json(self) -> None:
+        resp = self._get("/export?since_minutes=60&format=jsonl&subject=temperature")
+        ct = resp.headers.get("Content-Type", "")
+        self.assertIn("ndjson", ct)
+        lines = [l for l in resp.read().decode("utf-8").splitlines() if l.strip()]
+        self.assertGreater(len(lines), 0)
+        parsed = json.loads(lines[0])
+        self.assertIn("temperatureC", parsed)
+        self.assertNotIn("humidityPct", parsed)
+
+    def test_diagnostics_rejected_returns_empty_when_no_file(self) -> None:
+        payload = json.loads(self._get("/diagnostics/rejected").read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["entries"], [])
+
+    def test_root_lists_new_endpoints(self) -> None:
+        payload = json.loads(self._get("/").read().decode("utf-8"))
+        endpoints = payload["endpoints"]
+        self.assertTrue(any("/metrics" in e for e in endpoints))
+        self.assertTrue(any("/export" in e for e in endpoints))
+        self.assertTrue(any("/diagnostics/rejected" in e for e in endpoints))
+
+    def test_webhook_rate_limit_returns_429(self) -> None:
+        from api_server import _rate_limit_state, _rate_limit_lock
+        # Clear state before test to avoid cross-test contamination
+        with _rate_limit_lock:
+            _rate_limit_state.clear()
+
+        data = json.dumps({"text": "temperature"}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        responses = []
+        for _ in range(15):
+            req = urllib.request.Request(
+                f"{self._base}/webhook", data=data, headers=headers, method="POST"
+            )
+            try:
+                r = urllib.request.urlopen(req)
+                responses.append(r.status)
+            except urllib.error.HTTPError as exc:
+                responses.append(exc.code)
+        self.assertIn(429, responses)
+
+
+class TestRotateLogs(unittest.TestCase):
+    """Tests for scripts/rotate_logs.py."""
+
+    def _make_obs(self, observed_at: str) -> dict:
+        return {
+            "@type": "SensorObservation",
+            "temperatureC": 22.0,
+            "humidityPct": 50.0,
+            "observedAt": observed_at,
+        }
+
+    def test_rotate_dry_run_does_not_modify_file(self) -> None:
+        from rotate_logs import rotate
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "obs.jsonl"
+            obs = [self._make_obs(f"2026-01-0{i+1}T12:00:00Z") for i in range(3)]
+            log.write_text("\n".join(json.dumps(o) for o in obs) + "\n", encoding="utf-8")
+            original = log.read_text(encoding="utf-8")
+            result = rotate(log, Path(tmp) / "archive", keep_days=30, thin_after_days=7, dry_run=True)
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(log.read_text(encoding="utf-8"), original)
+
+    def test_rotate_archives_old_observations(self) -> None:
+        from rotate_logs import rotate
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "obs.jsonl"
+            archive_dir = Path(tmp) / "archive"
+            recent_obs = self._make_obs("2026-04-02T12:00:00Z")
+            old_obs = self._make_obs("2026-01-01T12:00:00Z")
+            log.write_text(
+                json.dumps(recent_obs) + "\n" + json.dumps(old_obs) + "\n",
+                encoding="utf-8",
+            )
+            result = rotate(log, archive_dir, keep_days=30, thin_after_days=7, dry_run=False)
+            self.assertEqual(result["archived"], 1)
+            self.assertEqual(result["total_out"], 1)
+            gz_files = list(archive_dir.glob("*.jsonl.gz"))
+            self.assertEqual(len(gz_files), 1)
+            with gzip.open(gz_files[0], "rt", encoding="utf-8") as gz:
+                archived_content = gz.read()
+            self.assertIn("2026-01-01", archived_content)
+
+    def test_rotate_skips_when_log_missing(self) -> None:
+        from rotate_logs import rotate
+        with tempfile.TemporaryDirectory() as tmp:
+            result = rotate(Path(tmp) / "missing.jsonl", Path(tmp) / "archive",
+                            keep_days=30, thin_after_days=7, dry_run=False)
+            self.assertTrue(result.get("skipped"))
+
+    def test_rotate_thins_mid_range_to_one_per_hour(self) -> None:
+        from rotate_logs import rotate
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "obs.jsonl"
+            archive_dir = Path(tmp) / "archive"
+            # 4 observations in same hour, 10 days ago (in thin range)
+            observations = [
+                self._make_obs("2026-03-23T10:00:00Z"),
+                self._make_obs("2026-03-23T10:15:00Z"),
+                self._make_obs("2026-03-23T10:30:00Z"),
+                self._make_obs("2026-03-23T10:45:00Z"),
+            ]
+            log.write_text("\n".join(json.dumps(o) for o in observations) + "\n", encoding="utf-8")
+            result = rotate(log, archive_dir, keep_days=30, thin_after_days=7, dry_run=False)
+            # All 4 are in the thin window (10d > 7d, < 30d), so thinned to 1
+            self.assertEqual(result["kept_thinned"], 1)
+            self.assertEqual(result["total_out"], 1)
+
+
+class TestCheckEnv(unittest.TestCase):
+    """Tests for scripts/check_env.py."""
+
+    def test_check_logs_dir_passes_for_writable_dir(self) -> None:
+        from check_env import check_logs_dir
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("check_env.ROOT_DIR", Path(tmp)):
+                self.assertTrue(check_logs_dir())
+
+    def test_admin_password_warns_but_passes_on_default(self) -> None:
+        from check_env import check_admin_password
+        import unittest.mock as mock
+        with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "8888"}, clear=False):
+            self.assertTrue(check_admin_password())
+
+    def test_admin_password_ok_when_changed(self) -> None:
+        from check_env import check_admin_password
+        import unittest.mock as mock
+        with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "supersecret"}, clear=False):
+            self.assertTrue(check_admin_password())
+
+
+class TestStatusCommand(unittest.TestCase):
+    """Tests for @ssa 8888 status and @ssa 8888 health commands."""
+
+    _OBS = {
+        "@type": "SensorObservation",
+        "sensorId": "arduino-test",
+        "observedAt": "2026-04-02T12:00:00Z",
+        "temperatureC": 23.4,
+        "humidityPct": 51.2,
+        "pressureHpa": 1008.7,
+    }
+
+    def test_status_command_returns_system_status(self) -> None:
+        from alarm_runtime import handle_admin_message
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            latest = tmp_path / "latest.json"
+            log = tmp_path / "obs.jsonl"
+            latest.write_text(json.dumps(self._OBS), encoding="utf-8")
+            log.write_text(json.dumps(self._OBS) + "\n", encoding="utf-8")
+            response = handle_admin_message(
+                "@ssa 8888 status",
+                log_path=log,
+            )
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertEqual(response["action"], "system_status")
+            reply = response["reply"]
+            self.assertIn("Status at", reply)
+            self.assertIn("Log:", reply)
+
+    def test_health_alias_works(self) -> None:
+        from alarm_runtime import handle_admin_message
+        response = handle_admin_message("@ssa 8888 health")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "system_status")
+
+    def test_status_included_in_help(self) -> None:
+        from alarm_runtime import handle_admin_message
+        response = handle_admin_message("@ssa 8888 help")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertIn("status", response["reply"])
+
+
 if __name__ == "__main__":
     unittest.main()
