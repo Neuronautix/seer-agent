@@ -507,6 +507,8 @@ ssa deploy               # upgrade: stop → git pull → pip install → system
 ssa rollback             # revert to the commit saved by the last ssa deploy
 ssa backup [dir]         # archive logs/, threshold-config.json, WhatsApp auth state
 ssa restore <file>       # restore from a backup tarball
+ssa rotate               # archive older observations and thin mid-range history
+ssa check                # run pre-flight environment checks manually
 
 ssa login                # start WhatsApp QR-code login flow
 ssa tasks-login          # run Google Tasks OAuth login flow

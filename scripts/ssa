@@ -16,6 +16,21 @@ usage() {
   echo "Usage: ssa {install|up|down|restart|status|health|watchdog|deploy|rollback|backup|restore|rotate|check|login|tasks-login|bridge|gateway}" >&2
 }
 
+install_systemd_units() {
+  echo "Installing systemd units (substituting user=$USER path=$ROOT_DIR)..."
+  for unit_src in "$ROOT_DIR/deploy/systemd/"*.service "$ROOT_DIR/deploy/systemd/"*.timer; do
+    [[ -f "$unit_src" ]] || continue
+    unit_name="$(basename "$unit_src")"
+    tmp="$(mktemp)"
+    sed -e "s|/home/dhuzard/sovereign-sensor-agent|$ROOT_DIR|g" \
+        -e "s|User=dhuzard|User=$USER|g" \
+        "$unit_src" > "$tmp"
+    sudo cp "$tmp" "/etc/systemd/system/$unit_name"
+    rm -f "$tmp"
+    echo "  installed /etc/systemd/system/$unit_name"
+  done
+}
+
 print_started_message() {
   cat <<'EOF'
 SSA stack started.
@@ -43,18 +58,7 @@ case "$COMMAND" in
     sudo chmod +x "$ROOT_DIR/scripts/ssa"
     echo "Installed: $target -> $ROOT_DIR/scripts/ssa"
 
-    echo "Installing systemd units (substituting user=$USER path=$ROOT_DIR)..."
-    for unit_src in "$ROOT_DIR/deploy/systemd/"*.service "$ROOT_DIR/deploy/systemd/"*.timer; do
-      [[ -f "$unit_src" ]] || continue
-      unit_name="$(basename "$unit_src")"
-      tmp="$(mktemp)"
-      sed -e "s|/home/dhuzard/sovereign-sensor-agent|$ROOT_DIR|g" \
-          -e "s|User=dhuzard|User=$USER|g" \
-          "$unit_src" > "$tmp"
-      sudo cp "$tmp" "/etc/systemd/system/$unit_name"
-      rm -f "$tmp"
-      echo "  installed /etc/systemd/system/$unit_name"
-    done
+    install_systemd_units
     sudo systemctl daemon-reload
 
     # Best-effort network dependency enablement
@@ -95,8 +99,7 @@ case "$COMMAND" in
     "$PYTHON_BIN" -m pip install -q -r "$ROOT_DIR/requirements.txt"
 
     echo "Updating systemd units..."
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    install_systemd_units
     sudo systemctl daemon-reload
 
     echo "Restarting ingest and API..."
@@ -126,8 +129,7 @@ case "$COMMAND" in
     "$PYTHON_BIN" -m pip install -q -r "$ROOT_DIR/requirements.txt"
 
     echo "Reloading systemd units..."
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    install_systemd_units
     sudo systemctl daemon-reload
 
     echo "Restarting ingest and API..."
