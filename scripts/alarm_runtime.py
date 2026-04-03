@@ -30,6 +30,10 @@ def get_admin_password() -> str:
     return os.environ.get("SSA_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
 
 
+def _admin_example(password: str, suffix: str) -> str:
+    return f"{WHATSAPP_PREFIX} {password} {suffix}"
+
+
 def strip_whatsapp_prefix(message_text: str) -> str | None:
     normalized = " ".join(message_text.strip().split())
     if not normalized:
@@ -64,10 +68,10 @@ def format_temperature_thresholds(config: dict[str, Any]) -> str:
     return f"Temperature warning {warning_max:.1f} C, critical {critical_max:.1f} C."
 
 
-def _parse_temperature_update(tokens: list[str]) -> tuple[str, float, list[str]]:
+def _parse_temperature_update(tokens: list[str], password: str) -> tuple[str, float, list[str]]:
     if not tokens:
         raise ValueError(
-            "Use 8888 set temp 30 or 8888 set temp critical 35."
+            f"Use {_admin_example(password, 'set temp 30')} or {_admin_example(password, 'set temp critical 35')}."
         )
 
     threshold_key = "warningMax"
@@ -82,7 +86,7 @@ def _parse_temperature_update(tokens: list[str]) -> tuple[str, float, list[str]]
 
     if not remaining:
         raise ValueError(
-            "Missing threshold value. Use 8888 set temp 30 or 8888 set temp critical 35."
+            f"Missing threshold value. Use {_admin_example(password, 'set temp 30')} or {_admin_example(password, 'set temp critical 35')}."
         )
 
     try:
@@ -112,7 +116,7 @@ def update_temperature_threshold(
             adjustments.append(f"critical adjusted to {critical_max:.1f} C")
         elif critical_max < warning_max:
             raise ValueError(
-                "Warning threshold cannot be above critical. Set critical first or use 8888 set temp 30."
+                f"Warning threshold cannot be above critical. Set critical first or use {_admin_example(get_admin_password(), 'set temp 30')}."
             )
     elif threshold_key == "criticalMax":
         critical_max = value
@@ -227,7 +231,7 @@ def _parse_time_duration(token: str) -> int:
     )
 
 
-def _handle_temp_history(tokens: list[str]) -> dict[str, Any]:
+def _handle_temp_history(tokens: list[str], password: str) -> dict[str, Any]:
     """Parse 'last 1h', 'plot last 30m', etc. and return a temp_history action dict."""
     remaining = tokens
     plot = False
@@ -238,7 +242,7 @@ def _handle_temp_history(tokens: list[str]) -> dict[str, Any]:
 
     if not remaining or remaining[0].lower() not in HISTORY_KEYWORDS:
         raise ValueError(
-            "Use @ssa 8888 temp last 1h or @ssa 8888 temp plot last 30m."
+            f"Use {_admin_example(password, 'temp last 1h')} or {_admin_example(password, 'temp plot last 30m')}."
         )
     remaining = remaining[1:]  # skip 'last' / 'history' / 'since'
 
@@ -271,7 +275,9 @@ def handle_admin_message(
 
     normalized = stripped
     if not normalized:
-        raise ValueError("Use @ssa 8888 thresholds or @ssa 8888 set temp 30.")
+        raise ValueError(
+            f"Use {_admin_example(get_admin_password(), 'thresholds')} or {_admin_example(get_admin_password(), 'set temp 30')}."
+        )
 
     tokens = normalized.split()
     expected_password = password or get_admin_password()
@@ -280,7 +286,9 @@ def handle_admin_message(
 
     command_tokens = tokens[1:]
     if not command_tokens:
-        raise ValueError("Use @ssa 8888 thresholds or @ssa 8888 set temp 30.")
+        raise ValueError(
+            f"Use {_admin_example(expected_password, 'thresholds')} or {_admin_example(expected_password, 'set temp 30')}."
+        )
 
     lowered = [token.lower() for token in command_tokens]
     if lowered[0] in {"help", "?"}:
@@ -288,9 +296,12 @@ def handle_admin_message(
             "ok": True,
             "action": "admin_help",
             "reply": (
-                "Admin commands: @ssa 8888 status, @ssa 8888 thresholds, "
-                "@ssa 8888 set temp 30, @ssa 8888 set temp critical 35, "
-                "@ssa 8888 temp last 1h, @ssa 8888 temp plot last 30m."
+                f"Admin commands: {_admin_example(expected_password, 'status')}, "
+                f"{_admin_example(expected_password, 'thresholds')}, "
+                f"{_admin_example(expected_password, 'set temp 30')}, "
+                f"{_admin_example(expected_password, 'set temp critical 35')}, "
+                f"{_admin_example(expected_password, 'temp last 1h')}, "
+                f"{_admin_example(expected_password, 'temp plot last 30m')}."
             ),
         }
 
@@ -320,12 +331,16 @@ def handle_admin_message(
     if lowered[0] in UPDATE_KEYWORDS:
         lowered = lowered[1:]
         if not lowered:
-            raise ValueError("Use @ssa 8888 set temp 30 or @ssa 8888 set temp critical 35.")
+            raise ValueError(
+                f"Use {_admin_example(expected_password, 'set temp 30')} or {_admin_example(expected_password, 'set temp critical 35')}."
+            )
 
     if lowered and lowered[0] in {"threshold", "thresholds", "alarm", "alarms"}:
         lowered = lowered[1:]
         if not lowered:
-            raise ValueError("Use @ssa 8888 set temp 30 or @ssa 8888 thresholds.")
+            raise ValueError(
+                f"Use {_admin_example(expected_password, 'set temp 30')} or {_admin_example(expected_password, 'thresholds')}."
+            )
 
     if lowered[0] not in TEMPERATURE_ALIASES:
         raise ValueError("Only temperature threshold updates are supported over WhatsApp right now.")
@@ -340,11 +355,13 @@ def handle_admin_message(
 
     # History query: "temp last 1h", "temp plot last 30m", etc.
     if lowered[1] in HISTORY_KEYWORDS or lowered[1] == "plot":
-        return _handle_temp_history(lowered[1:])
+        return _handle_temp_history(lowered[1:], expected_password)
 
-    threshold_key, value, trailing = _parse_temperature_update(lowered[1:])
+    threshold_key, value, trailing = _parse_temperature_update(lowered[1:], expected_password)
     if trailing:
-        raise ValueError("Too many arguments. Use @ssa 8888 set temp 30 or @ssa 8888 set temp critical 35.")
+        raise ValueError(
+            f"Too many arguments. Use {_admin_example(expected_password, 'set temp 30')} or {_admin_example(expected_password, 'set temp critical 35')}."
+        )
 
     implicit_warning_update = threshold_key == "warningMax" and len(lowered[1:]) == 1
     updated_config, adjustments = update_temperature_threshold(
