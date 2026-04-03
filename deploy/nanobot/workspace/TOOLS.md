@@ -13,3 +13,9 @@ This file documents non-obvious constraints and usage patterns.
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
+
+## Google Tasks MCP
+
+- Enabled only when `NANOBOT_ENABLE_GOOGLE_TASKS=true`.
+- Requires OAuth token file (default `deploy/nanobot/google-tasks-token.json`).
+- Task events can optionally be mirrored to Google Chat via `GOOGLE_CHAT_WEBHOOK_URL`.

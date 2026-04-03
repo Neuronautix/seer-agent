@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from alarm_runtime import handle_admin_message, strip_whatsapp_prefix
 from observation_analysis import SEVERITY_RANK, evaluate_thresholds, load_config
 
 DEFAULT_LATEST_PATH = ROOT_DIR / "logs" / "latest-observation.json"
+DEFAULT_OBSERVATIONS_PATH = ROOT_DIR / "logs" / "validated-observations.jsonl"
 DEFAULT_STATE_PATH = ROOT_DIR / "logs" / "whatsapp-alert-state.json"
 DEFAULT_CHAT_REGISTRY_PATH = ROOT_DIR / "logs" / "whatsapp-chat-registry.json"
 
@@ -58,9 +61,12 @@ class WhatsAppAlarmDaemon:
         self.alert_targets = self._parse_id_list(alert_targets_raw)
         self.config_path = Path(os.environ.get("SSA_THRESHOLD_CONFIG", ROOT_DIR / "threshold-config.json"))
         self.latest_path = Path(os.environ.get("SSA_LATEST_OBSERVATION", DEFAULT_LATEST_PATH))
+        self.observations_path = Path(os.environ.get("SSA_OBSERVATIONS_LOG", DEFAULT_OBSERVATIONS_PATH))
         self.state_path = Path(os.environ.get("SSA_ALERT_STATE_FILE", DEFAULT_STATE_PATH))
         self.chat_registry_path = Path(os.environ.get("SSA_CHAT_REGISTRY_FILE", DEFAULT_CHAT_REGISTRY_PATH))
         self.poll_interval = float(os.environ.get("SSA_ALERT_POLL_INTERVAL", "2.0"))
+        self.alarm_repeat_interval = float(os.environ.get("SSA_ALARM_REPEAT_INTERVAL", "300"))
+        self.offline_threshold_seconds = float(os.environ.get("SSA_OFFLINE_THRESHOLD_MINUTES", "10")) * 60
         self.state = _load_json_dict(self.state_path)
         self.chat_registry = _load_json_dict(self.chat_registry_path)
         self._connected = asyncio.Event()
@@ -140,6 +146,71 @@ class WhatsAppAlarmDaemon:
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
         return True
 
+    async def send_image(self, chat_id: str, image_path: Path, caption: str = "") -> bool:
+        """Send a PNG image via the WhatsApp bridge as a base64-encoded payload.
+
+        The bridge must support {"type": "send", "to": ..., "image": <base64>, "caption": ...}.
+        Returns False if not connected or the bridge does not acknowledge.
+        """
+        if not self._connected.is_set() or self._ws is None:
+            return False
+
+        image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        payload: dict[str, Any] = {"type": "send", "to": chat_id, "image": image_data}
+        if caption:
+            payload["caption"] = caption
+
+        async with self._send_lock:
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        return True
+
+    async def _send_temp_history(self, chat_id: str, action_data: dict[str, Any]) -> None:
+        """Fetch bucketed temperature observations and send them as text or a plot."""
+        from observation_analysis import bucket_observations, load_config, read_observations_in_window
+        from temperature_report import format_temperature_table, generate_temperature_plot
+
+        since_minutes: int = int(action_data.get("since_minutes", 60))
+        bucket_minutes: int = int(action_data.get("bucket_minutes", 5))
+        want_plot: bool = bool(action_data.get("plot", False))
+
+        try:
+            observations = read_observations_in_window(self.observations_path, since_minutes)
+            bucketed = bucket_observations(observations, bucket_minutes)
+            config = load_config(self.config_path)
+        except (FileNotFoundError, ValueError) as exc:
+            await self.send_text(chat_id, f"No data available: {exc}")
+            return
+        except Exception as exc:
+            print(f"whatsapp alarm daemon temp history load error: {exc}", file=sys.stderr, flush=True)
+            await self.send_text(chat_id, "Error retrieving temperature history.")
+            return
+
+        if want_plot:
+            try:
+                plot_path = generate_temperature_plot(
+                    bucketed,
+                    config,
+                    since_minutes,
+                    bucket_minutes,
+                )
+                caption = f"Temperature last {since_minutes}min ({bucket_minutes}-min buckets)"
+                sent = await self.send_image(chat_id, plot_path, caption)
+                try:
+                    plot_path.unlink()
+                except OSError:
+                    pass
+                if not sent:
+                    # Bridge may not support images — fall back to text
+                    text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
+                    await self.send_text(chat_id, text)
+            except Exception as exc:
+                print(f"whatsapp alarm daemon plot error: {exc}", file=sys.stderr, flush=True)
+                text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
+                await self.send_text(chat_id, text)
+        else:
+            text = format_temperature_table(bucketed, config, since_minutes, bucket_minutes)
+            await self.send_text(chat_id, text)
+
     async def handle_inbound_message(self, data: dict[str, Any]) -> None:
         sender = str(data.get("sender", ""))
         content = str(data.get("content", "")).strip()
@@ -172,12 +243,22 @@ class WhatsAppAlarmDaemon:
             return
 
         try:
-            response = handle_admin_message(content, config_path=self.config_path)
+            response = handle_admin_message(
+                content,
+                config_path=self.config_path,
+                log_path=self.observations_path,
+                latest_path=self.latest_path,
+                rejected_path=self.observations_path.parent / "rejected-lines.jsonl",
+            )
         except ValueError as exc:
             await self.send_text(sender, str(exc))
             return
 
         if response is None:
+            return
+
+        if response.get("action") == "temp_history":
+            await self._send_temp_history(sender, response)
             return
 
         reply = response.get("reply")
@@ -217,22 +298,72 @@ class WhatsAppAlarmDaemon:
                             temperature = evaluation["thresholdStatus"].get("temperature", {})
                             current_status = str(temperature.get("status", "unavailable"))
                             previous_status = str(self.state.get("lastTemperatureStatus", "unavailable"))
+                            last_notified_at = self.state.get("lastAlarmNotifiedAt")  # float or None
+
+                            recipients = self._resolve_alert_recipients()
+                            message: str | None = None
 
                             if temperature.get("available") and temperature.get("alarm"):
-                                if previous_status not in {"warning", "critical"} or SEVERITY_RANK[current_status] > SEVERITY_RANK.get(previous_status, 0):
-                                    recipients = self._resolve_alert_recipients()
+                                now = time.time()
+                                secs_since_notify = (now - last_notified_at) if last_notified_at else None
+                                is_new_alarm = previous_status not in {"warning", "critical"}
+                                is_escalation = SEVERITY_RANK[current_status] > SEVERITY_RANK.get(previous_status, 0)
+                                is_repeat_due = secs_since_notify is not None and secs_since_notify >= self.alarm_repeat_interval
+
+                                if is_new_alarm or is_escalation or is_repeat_due:
+                                    prefix = "STILL ACTIVE — " if is_repeat_due and not is_new_alarm and not is_escalation else ""
                                     message = (
-                                        f"Temperature alarm: {temperature['value']} {temperature['unit']} "
+                                        f"{prefix}Temperature alarm: {temperature['value']} {temperature['unit']} "
                                         f"({current_status}) at {observed_at}. "
                                         f"Warning {temperature['thresholds']['warningMax']} C, "
                                         f"critical {temperature['thresholds']['criticalMax']} C."
                                     )
-                                    for recipient in recipients:
-                                        await self.send_text(recipient, message)
+                                    self.state["lastAlarmNotifiedAt"] = now
+
+                            elif previous_status in {"warning", "critical"} and last_notified_at is not None:
+                                # Alarm just cleared
+                                message = (
+                                    f"Temperature back to normal: {temperature.get('value', '?')} "
+                                    f"{temperature.get('unit', 'C')} at {observed_at}."
+                                )
+                                self.state["lastAlarmNotifiedAt"] = None
+
+                            if message:
+                                for recipient in recipients:
+                                    await self.send_text(recipient, message)
 
                             self.state["lastObservedAt"] = observed_at
                             self.state["lastTemperatureStatus"] = current_status
+                            # If we were previously flagged as offline, the sensor is back
+                            if self.state.get("lastOfflineNotifiedAt") is not None:
+                                self.state["lastOfflineNotifiedAt"] = None
+                                recovery_msg = f"Sensor back online: reading at {observed_at}."
+                                for recipient in self._resolve_alert_recipients():
+                                    await self.send_text(recipient, recovery_msg)
                             _save_json(self.state_path, self.state)
+
+                # Offline check — runs every poll cycle regardless of new data
+                last_obs_at = self.state.get("lastObservedAt")
+                if last_obs_at:
+                    try:
+                        last_dt = datetime.fromisoformat(last_obs_at.replace("Z", "+00:00"))
+                        silence_secs = (datetime.now(tz=timezone.utc) - last_dt).total_seconds()
+                        last_offline_at = self.state.get("lastOfflineNotifiedAt")
+                        if silence_secs > self.offline_threshold_seconds:
+                            now = time.time()
+                            repeat_due = last_offline_at is None or (now - last_offline_at) >= self.alarm_repeat_interval
+                            if repeat_due:
+                                silence_min = int(silence_secs // 60)
+                                offline_msg = (
+                                    f"Sensor offline: no new reading since {last_obs_at} "
+                                    f"({silence_min} min ago)."
+                                )
+                                for recipient in self._resolve_alert_recipients():
+                                    await self.send_text(recipient, offline_msg)
+                                self.state["lastOfflineNotifiedAt"] = now
+                                _save_json(self.state_path, self.state)
+                    except (ValueError, OSError):
+                        pass
             except Exception as exc:
                 print(f"whatsapp alarm daemon alert error: {exc}", file=sys.stderr, flush=True)
 

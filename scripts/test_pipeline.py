@@ -610,6 +610,106 @@ class PipelineTests(unittest.TestCase):
                 thread.join(timeout=2)
 
 
+class TestApiHistoryAndCors(unittest.TestCase):
+    """Tests for /history endpoint, CORS headers, and /latest envelope."""
+
+    _OBSERVATION = {
+        "@context": {"@vocab": "https://sovereign-sensor-agent.local/ontology#"},
+        "@type": "SensorObservation",
+        "schemaVersion": "sensor-observation-v1",
+        "sensorId": "arduino-ttyACM0",
+        "sourcePort": "/dev/ttyACM0",
+        "observedAt": "2026-04-02T12:00:00Z",
+        "temperatureC": 23.4,
+        "humidityPct": 51.2,
+        "pressureHpa": 1008.7,
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._latest_path = tmp / "latest-observation.json"
+        self._log_path = tmp / "obs.jsonl"
+        self._latest_path.write_text(json.dumps(self._OBSERVATION), encoding="utf-8")
+        self._log_path.write_text(json.dumps(self._OBSERVATION) + "\n", encoding="utf-8")
+        self._server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self._latest_path, self._log_path),
+        )
+        thread = Thread(target=self._server.serve_forever, daemon=True)
+        thread.start()
+        self._base = f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._tmp.cleanup()
+
+    def _get(self, path: str):
+        return urllib.request.urlopen(f"{self._base}{path}")
+
+    def test_latest_response_has_ok_true(self) -> None:
+        payload = json.loads(self._get("/latest").read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "get_latest")
+        # Sensor fields still accessible at top level (backward compatible)
+        self.assertEqual(payload["temperatureC"], 23.4)
+        self.assertEqual(payload["pressureHpa"], 1008.7)
+
+    def test_history_endpoint_returns_points_array(self) -> None:
+        payload = json.loads(
+            self._get("/history?since_minutes=60&bucket_minutes=5&subject=all").read().decode("utf-8")
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"], "get_history")
+        self.assertIn("points", payload)
+        self.assertIsInstance(payload["points"], list)
+        self.assertGreater(payload["window"]["pointCount"], 0)
+        point = payload["points"][0]
+        self.assertIn("observedAt", point)
+        self.assertIn("temperatureC", point)
+        self.assertIn("humidityPct", point)
+
+    def test_history_subject_filter_excludes_other_fields(self) -> None:
+        payload = json.loads(
+            self._get("/history?since_minutes=60&bucket_minutes=5&subject=temperature").read().decode("utf-8")
+        )
+        self.assertEqual(payload["subject"], "temperature")
+        point = payload["points"][0]
+        self.assertIn("temperatureC", point)
+        self.assertNotIn("humidityPct", point)
+        self.assertNotIn("pressureHpa", point)
+
+    def test_history_default_params(self) -> None:
+        payload = json.loads(self._get("/history").read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["window"]["sinceMinutes"], 60)
+        self.assertEqual(payload["window"]["bucketMinutes"], 5)
+
+    def test_cors_header_present_on_get(self) -> None:
+        response = self._get("/health")
+        self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+        self.assertIn("GET", response.headers.get("Access-Control-Allow-Methods", ""))
+
+    def test_cors_options_preflight(self) -> None:
+        req = urllib.request.Request(f"{self._base}/latest", method="OPTIONS")
+        response = urllib.request.urlopen(req)
+        self.assertEqual(response.status, 204)
+        self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+
+    def test_root_endpoint_list_includes_history_and_config(self) -> None:
+        payload = json.loads(self._get("/").read().decode("utf-8"))
+        endpoints = payload["endpoints"]
+        self.assertTrue(any("/history" in ep for ep in endpoints))
+        self.assertTrue(any("/config/thresholds" in ep for ep in endpoints))
+
+    def test_content_type_includes_charset(self) -> None:
+        response = self._get("/health")
+        ct = response.headers.get("Content-Type", "")
+        self.assertIn("application/json", ct)
+        self.assertIn("charset=utf-8", ct)
+
+
 class TestBuildHealthPayload(unittest.TestCase):
     def test_returns_waiting_when_file_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -671,6 +771,296 @@ class TestBuildHealthPayload(unittest.TestCase):
             self.assertEqual(result["status"], "ready")
             self.assertTrue(result["latestObservationAvailable"])
             self.assertNotIn("freshnessAgeSeconds", result)
+
+
+class TestNewApiEndpoints(unittest.TestCase):
+    """Tests for /metrics, /export, /diagnostics/rejected, and webhook rate limiting."""
+
+    _OBS = {
+        "@context": {"@vocab": "https://sovereign-sensor-agent.local/ontology#"},
+        "@type": "SensorObservation",
+        "schemaVersion": "sensor-observation-v1",
+        "sensorId": "arduino-ttyACM0",
+        "sourcePort": "/dev/ttyACM0",
+        "observedAt": "2026-04-02T12:00:00Z",
+        "temperatureC": 23.4,
+        "humidityPct": 51.2,
+        "pressureHpa": 1008.7,
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self._latest = tmp / "latest.json"
+        self._log = tmp / "obs.jsonl"
+        self._rejected = tmp / "rejected.jsonl"
+        self._latest.write_text(json.dumps(self._OBS), encoding="utf-8")
+        self._log.write_text(json.dumps(self._OBS) + "\n", encoding="utf-8")
+        self._server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self._latest, self._log, rejected_path=self._rejected),
+        )
+        Thread(target=self._server.serve_forever, daemon=True).start()
+        self._base = f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def tearDown(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._tmp.cleanup()
+
+    def _get(self, path: str):
+        return urllib.request.urlopen(f"{self._base}{path}")
+
+    def test_metrics_endpoint_returns_prometheus_text(self) -> None:
+        resp = self._get("/metrics")
+        ct = resp.headers.get("Content-Type", "")
+        self.assertIn("text/plain", ct)
+        body = resp.read().decode("utf-8")
+        self.assertIn("ssa_temperature_celsius 23.4", body)
+        self.assertIn("ssa_humidity_percent 51.2", body)
+        self.assertIn("ssa_alarm_active", body)
+        self.assertIn("# HELP", body)
+        self.assertIn("# TYPE", body)
+
+    def test_export_csv_returns_valid_csv(self) -> None:
+        resp = self._get("/export?since_minutes=60&format=csv&subject=all")
+        ct = resp.headers.get("Content-Type", "")
+        cd = resp.headers.get("Content-Disposition", "")
+        self.assertIn("text/csv", ct)
+        self.assertIn("attachment", cd)
+        self.assertIn(".csv", cd)
+        body = resp.read().decode("utf-8")
+        self.assertIn("observedAt", body)
+        self.assertIn("temperatureC", body)
+        self.assertIn("23.4", body)
+
+    def test_export_jsonl_returns_newline_delimited_json(self) -> None:
+        resp = self._get("/export?since_minutes=60&format=jsonl&subject=temperature")
+        ct = resp.headers.get("Content-Type", "")
+        self.assertIn("ndjson", ct)
+        lines = [l for l in resp.read().decode("utf-8").splitlines() if l.strip()]
+        self.assertGreater(len(lines), 0)
+        parsed = json.loads(lines[0])
+        self.assertIn("temperatureC", parsed)
+        self.assertNotIn("humidityPct", parsed)
+
+    def test_diagnostics_rejected_returns_empty_when_no_file(self) -> None:
+        payload = json.loads(self._get("/diagnostics/rejected").read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["totalRejected"], 0)
+        self.assertEqual(payload["returnedCount"], 0)
+        self.assertEqual(payload["entries"], [])
+
+    def test_diagnostics_rejected_uses_handler_rejected_path(self) -> None:
+        self._rejected.write_text(
+            '{"raw":"bad line","error":"invalid"}\n',
+            encoding="utf-8",
+        )
+        payload = json.loads(self._get("/diagnostics/rejected").read().decode("utf-8"))
+        self.assertEqual(payload["totalRejected"], 1)
+        self.assertEqual(payload["returnedCount"], 1)
+        self.assertEqual(payload["entries"][0]["error"], "invalid")
+
+    def test_root_lists_new_endpoints(self) -> None:
+        payload = json.loads(self._get("/").read().decode("utf-8"))
+        endpoints = payload["endpoints"]
+        self.assertTrue(any("/metrics" in e for e in endpoints))
+        self.assertTrue(any("/export" in e for e in endpoints))
+        self.assertTrue(any("/diagnostics/rejected" in e for e in endpoints))
+
+    def test_webhook_rate_limit_returns_429(self) -> None:
+        from api_server import _rate_limit_state, _rate_limit_lock
+        # Clear state before test to avoid cross-test contamination
+        with _rate_limit_lock:
+            _rate_limit_state.clear()
+
+        data = json.dumps({"text": "temperature"}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        responses = []
+        for _ in range(15):
+            req = urllib.request.Request(
+                f"{self._base}/webhook", data=data, headers=headers, method="POST"
+            )
+            try:
+                r = urllib.request.urlopen(req)
+                responses.append(r.status)
+            except urllib.error.HTTPError as exc:
+                responses.append(exc.code)
+        self.assertIn(429, responses)
+
+
+class TestRotateLogs(unittest.TestCase):
+    """Tests for scripts/rotate_logs.py."""
+
+    def _make_obs(self, observed_at: str) -> dict:
+        return {
+            "@type": "SensorObservation",
+            "temperatureC": 22.0,
+            "humidityPct": 50.0,
+            "observedAt": observed_at,
+        }
+
+    def test_rotate_dry_run_does_not_modify_file(self) -> None:
+        from rotate_logs import rotate
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "obs.jsonl"
+            obs = [self._make_obs(f"2026-01-0{i+1}T12:00:00Z") for i in range(3)]
+            log.write_text("\n".join(json.dumps(o) for o in obs) + "\n", encoding="utf-8")
+            original = log.read_text(encoding="utf-8")
+            result = rotate(log, Path(tmp) / "archive", keep_days=30, thin_after_days=7, dry_run=True)
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(log.read_text(encoding="utf-8"), original)
+
+    def test_rotate_archives_old_observations(self) -> None:
+        from rotate_logs import rotate
+        import gzip
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "obs.jsonl"
+            archive_dir = Path(tmp) / "archive"
+            recent_obs = self._make_obs("2026-04-02T12:00:00Z")
+            old_obs = self._make_obs("2026-01-01T12:00:00Z")
+            log.write_text(
+                json.dumps(recent_obs) + "\n" + json.dumps(old_obs) + "\n",
+                encoding="utf-8",
+            )
+            result = rotate(log, archive_dir, keep_days=30, thin_after_days=7, dry_run=False)
+            self.assertEqual(result["archived"], 1)
+            self.assertEqual(result["total_out"], 1)
+            gz_files = list(archive_dir.glob("*.jsonl.gz"))
+            self.assertEqual(len(gz_files), 1)
+            with gzip.open(gz_files[0], "rt", encoding="utf-8") as gz:
+                archived_content = gz.read()
+            self.assertIn("2026-01-01", archived_content)
+
+    def test_rotate_skips_when_log_missing(self) -> None:
+        from rotate_logs import rotate
+        with tempfile.TemporaryDirectory() as tmp:
+            result = rotate(Path(tmp) / "missing.jsonl", Path(tmp) / "archive",
+                            keep_days=30, thin_after_days=7, dry_run=False)
+            self.assertTrue(result.get("skipped"))
+
+    def test_rotate_thins_mid_range_to_one_per_hour(self) -> None:
+        from rotate_logs import rotate
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "obs.jsonl"
+            archive_dir = Path(tmp) / "archive"
+            # 4 observations in same hour, 10 days ago (in thin range)
+            observations = [
+                self._make_obs("2026-03-23T10:00:00Z"),
+                self._make_obs("2026-03-23T10:15:00Z"),
+                self._make_obs("2026-03-23T10:30:00Z"),
+                self._make_obs("2026-03-23T10:45:00Z"),
+            ]
+            log.write_text("\n".join(json.dumps(o) for o in observations) + "\n", encoding="utf-8")
+            result = rotate(log, archive_dir, keep_days=30, thin_after_days=7, dry_run=False)
+            # All 4 are in the thin window (10d > 7d, < 30d), so thinned to 1
+            self.assertEqual(result["kept_thinned"], 1)
+            self.assertEqual(result["total_out"], 1)
+
+
+class TestCheckEnv(unittest.TestCase):
+    """Tests for scripts/check_env.py."""
+
+    def test_check_logs_dir_passes_for_writable_dir(self) -> None:
+        from check_env import check_logs_dir
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("check_env.ROOT_DIR", Path(tmp)):
+                self.assertTrue(check_logs_dir())
+
+    def test_admin_password_warns_but_passes_on_default(self) -> None:
+        from check_env import check_admin_password
+        import unittest.mock as mock
+        with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "8888"}, clear=False):
+            self.assertTrue(check_admin_password())
+
+    def test_admin_password_ok_when_changed(self) -> None:
+        from check_env import check_admin_password
+        import unittest.mock as mock
+        with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "supersecret"}, clear=False):
+            self.assertTrue(check_admin_password())
+
+    def test_run_checks_all_includes_service_specific_checks(self) -> None:
+        from check_env import run_checks
+        import unittest.mock as mock
+
+        calls: list[str] = []
+
+        with mock.patch("check_env.check_logs_dir", return_value=True), \
+             mock.patch("check_env.check_python_venv", return_value=True), \
+             mock.patch("check_env.check_threshold_config", return_value=True), \
+             mock.patch("check_env.check_admin_password", return_value=True), \
+             mock.patch("check_env.check_serial_device", side_effect=lambda: calls.append("serial") or True), \
+             mock.patch("check_env.check_gemini_api_key", side_effect=lambda: calls.append("gemini") or True), \
+             mock.patch("check_env.check_whatsapp_allow_from", side_effect=lambda: calls.append("allow") or True):
+            self.assertTrue(run_checks("all"))
+
+        self.assertEqual(calls, ["serial", "gemini", "allow"])
+
+
+class TestStatusCommand(unittest.TestCase):
+    """Tests for @ssa 8888 status and @ssa 8888 health commands."""
+
+    _OBS = {
+        "@type": "SensorObservation",
+        "sensorId": "arduino-test",
+        "observedAt": "2026-04-02T12:00:00Z",
+        "temperatureC": 23.4,
+        "humidityPct": 51.2,
+        "pressureHpa": 1008.7,
+    }
+
+    def test_status_command_returns_system_status(self) -> None:
+        from alarm_runtime import handle_admin_message
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            latest = tmp_path / "latest.json"
+            log = tmp_path / "obs.jsonl"
+            latest.write_text(json.dumps(self._OBS), encoding="utf-8")
+            log.write_text(json.dumps(self._OBS) + "\n", encoding="utf-8")
+            response = handle_admin_message(
+                "@ssa 8888 status",
+                log_path=log,
+                latest_path=latest,
+                rejected_path=tmp_path / "rejected.jsonl",
+            )
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertEqual(response["action"], "system_status")
+            reply = response["reply"]
+            self.assertIn("Status at", reply)
+            self.assertIn("arduino-test", reply)
+            self.assertIn("Log:", reply)
+
+    def test_status_handles_non_object_latest_payload(self) -> None:
+        from alarm_runtime import handle_admin_message
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            latest = tmp_path / "latest.json"
+            latest.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+            response = handle_admin_message(
+                "@ssa 8888 status",
+                latest_path=latest,
+                log_path=tmp_path / "obs.jsonl",
+                rejected_path=tmp_path / "rejected.jsonl",
+            )
+            self.assertIsNotNone(response)
+            assert response is not None
+            self.assertIn("invalid latest observation format", response["reply"])
+
+    def test_health_alias_works(self) -> None:
+        from alarm_runtime import handle_admin_message
+        response = handle_admin_message("@ssa 8888 health")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response["action"], "system_status")
+
+    def test_status_included_in_help(self) -> None:
+        from alarm_runtime import handle_admin_message
+        response = handle_admin_message("@ssa 8888 help")
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertIn("status", response["reply"])
 
 
 if __name__ == "__main__":

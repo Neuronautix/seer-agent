@@ -14,6 +14,8 @@ logs/*.json
 logs/*.jsonl
 deploy/nanobot/runtime-config.json
 deploy/nanobot/nanobot.env
+deploy/nanobot/google-tasks-token.json
+deploy/nanobot/google-client-secret*.json
 deploy/nanobot/whatsapp-auth/
 deploy/nanobot/workspace/sessions/
 memory/

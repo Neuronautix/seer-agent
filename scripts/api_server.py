@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
+import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from alarm_runtime import handle_admin_message
-from observation_analysis import evaluate_thresholds, load_config, read_observations_in_window, read_recent_observations, summarize_window
+from observation_analysis import bucket_observations, evaluate_thresholds, load_config, read_observations_in_window, read_recent_observations, summarize_window
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_LATEST_PATH = SCRIPT_DIR.parent / "logs" / "latest-observation.json"
@@ -23,6 +28,91 @@ METRICS = {
     "humidity": {"field": "humidityPct", "unit": "%"},
     "pressure": {"field": "pressureHpa", "unit": "hPa"},
 }
+
+# CORS headers sent with every response so browsers and third-party apps can
+# call this API without a proxy.
+_CORS_HEADERS = [
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+    ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+    ("Access-Control-Max-Age", "86400"),
+]
+
+HISTORY_FIELDS: dict[str, set[str]] = {
+    "all": {"temperatureC", "humidityPct", "pressureHpa"},
+    "temperature": {"temperatureC"},
+    "humidity": {"humidityPct"},
+    "pressure": {"pressureHpa"},
+}
+
+DEFAULT_REJECTED_PATH = SCRIPT_DIR.parent / "logs" / "rejected-lines.jsonl"
+
+# ---------------------------------------------------------------------------
+# Webhook rate limiter: max 10 requests per 10 s per client IP (in-memory)
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_WINDOW = 10.0
+_RATE_LIMIT_MAX = 10
+_rate_limit_state: dict[str, deque] = {}
+_rate_limit_lock = threading.Lock()
+_OBS_COUNT_CACHE_TTL_SECONDS = 30.0
+_obs_count_cache: dict[str, tuple[int, int, int, float]] = {}
+
+
+def _prune_rate_limit_state(now: float) -> None:
+    cutoff = now - _RATE_LIMIT_WINDOW
+    for client_ip, timestamps in list(_rate_limit_state.items()):
+        while timestamps and timestamps[0] < cutoff:
+            timestamps.popleft()
+        if not timestamps:
+            _rate_limit_state.pop(client_ip, None)
+
+
+def _is_rate_limited(client_ip: str) -> bool:
+    now = time.monotonic()
+    with _rate_limit_lock:
+        _prune_rate_limit_state(now)
+        timestamps = _rate_limit_state.setdefault(client_ip, deque())
+        if len(timestamps) >= _RATE_LIMIT_MAX:
+            return True
+        timestamps.append(now)
+        return False
+
+
+def _count_nonempty_lines_cached(log_path: Path) -> int:
+    if not log_path.exists():
+        _obs_count_cache.pop(str(log_path), None)
+        return 0
+
+    cache_key = str(log_path)
+    now = time.monotonic()
+    try:
+        stat = log_path.stat()
+    except OSError:
+        _obs_count_cache.pop(cache_key, None)
+        return 0
+
+    cached = _obs_count_cache.get(cache_key)
+    if cached is not None:
+        cached_mtime_ns, cached_size, cached_count, cached_at = cached
+        if (
+            cached_mtime_ns == stat.st_mtime_ns
+            and cached_size == stat.st_size
+            and now - cached_at <= _OBS_COUNT_CACHE_TTL_SECONDS
+        ):
+            return cached_count
+
+    count = 0
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.strip():
+                    count += 1
+    except OSError:
+        _obs_count_cache.pop(cache_key, None)
+        return 0
+
+    _obs_count_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, count, now)
+    return count
 
 def load_latest_observation(latest_path: Path) -> dict[str, Any]:
     if not latest_path.exists():
@@ -73,6 +163,8 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
         "status": build_health_payload(latest_path)["status"],
         "endpoints": [
             "/health",
+            "/metrics",
+            "/config/thresholds",
             "/latest",
             "/latest/temp",
             "/latest/humidity",
@@ -80,7 +172,11 @@ def build_root_payload(latest_path: Path) -> dict[str, Any]:
             "/latest/threshold-status",
             "/latest/alarm-status",
             "/summary?count=10&subject=all",
-            "/summary?since_minutes=30&bucket_minutes=1&subject=temperature",
+            "/summary?since_minutes=30&bucket_minutes=5&subject=temperature",
+            "/history?since_minutes=60&bucket_minutes=5&subject=all",
+            "/export?since_minutes=1440&subject=all&format=csv",
+            "/export?since_minutes=1440&subject=all&format=jsonl",
+            "/diagnostics/rejected?tail=50",
             "/webhook",
         ],
     }
@@ -172,6 +268,161 @@ def build_summary_payload(
         }
     )
     return payload
+
+
+def build_history_payload(
+    log_path: Path,
+    since_minutes: int,
+    bucket_minutes: int,
+    subject: str,
+) -> dict[str, Any]:
+    if subject not in HISTORY_FIELDS:
+        raise ValueError("subject must be all, temperature, humidity, or pressure")
+    if since_minutes < 1:
+        raise ValueError("since_minutes must be at least 1")
+    if bucket_minutes < 1:
+        raise ValueError("bucket_minutes must be at least 1")
+
+    observations = read_observations_in_window(log_path, since_minutes=since_minutes)
+    bucketed = bucket_observations(observations, bucket_minutes)
+
+    fields = HISTORY_FIELDS[subject]
+    points: list[dict[str, Any]] = []
+    for obs in bucketed:
+        point: dict[str, Any] = {"observedAt": obs.get("observedAt")}
+        for field in ("temperatureC", "humidityPct", "pressureHpa"):
+            if field in fields and obs.get(field) is not None:
+                point[field] = obs[field]
+        points.append(point)
+
+    last = bucketed[-1] if bucketed else {}
+    return {
+        "ok": True,
+        "action": "get_history",
+        "window": {
+            "sinceMinutes": since_minutes,
+            "bucketMinutes": bucket_minutes,
+            "observedFrom": bucketed[0].get("observedAt") if bucketed else None,
+            "observedTo": last.get("observedAt"),
+            "pointCount": len(points),
+        },
+        "subject": subject,
+        "sensorId": last.get("sensorId"),
+        "sourcePort": last.get("sourcePort"),
+        "schemaVersion": last.get("schemaVersion"),
+        "points": points,
+    }
+
+
+def build_metrics_text(latest_path: Path, log_path: Path) -> str:
+    """Return a Prometheus exposition-format text payload."""
+    lines: list[str] = []
+
+    def gauge(name: str, value: Any, help_text: str) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {value}")
+
+    try:
+        obs = json.loads(latest_path.read_text(encoding="utf-8"))
+        if isinstance(obs, dict):
+            if (temp := obs.get("temperatureC")) is not None:
+                gauge("ssa_temperature_celsius", temp, "Latest validated temperature in Celsius")
+            if (hum := obs.get("humidityPct")) is not None:
+                gauge("ssa_humidity_percent", hum, "Latest validated humidity in percent")
+            if (press := obs.get("pressureHpa")) is not None:
+                gauge("ssa_pressure_hpa", press, "Latest validated pressure in hPa")
+            if (obs_at := obs.get("observedAt")):
+                last_dt = datetime.fromisoformat(obs_at.replace("Z", "+00:00"))
+                age = int((datetime.now(tz=timezone.utc) - last_dt).total_seconds())
+                gauge("ssa_observation_age_seconds", age, "Seconds since last validated observation")
+                gauge("ssa_sensor_fresh", 1 if age <= FRESHNESS_THRESHOLD_SECONDS else 0,
+                      "1 if latest observation is within freshness threshold")
+            from observation_analysis import evaluate_thresholds, load_config
+            ev = evaluate_thresholds(obs, load_config())
+            gauge("ssa_alarm_active", 1 if ev["hasActiveAlarms"] else 0,
+                  "1 if any sensor metric is currently in an alarm state")
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
+        gauge("ssa_sensor_fresh", 0, "1 if latest observation is within freshness threshold")
+        gauge("ssa_alarm_active", 0, "1 if any sensor metric is currently in an alarm state")
+
+    obs_count = _count_nonempty_lines_cached(log_path)
+    gauge("ssa_total_observations", obs_count, "Total validated observations stored")
+
+    return "\n".join(lines) + "\n"
+
+
+def build_rejected_payload(rejected_path: Path, tail: int) -> dict[str, Any]:
+    """Return the last `tail` rejected lines with raw content and error info."""
+    if not rejected_path.exists():
+        return {
+            "ok": True,
+            "action": "get_rejected",
+            "totalRejected": 0,
+            "returnedCount": 0,
+            "entries": [],
+        }
+
+    raw_lines: deque[str] = deque(maxlen=tail)
+    total = 0
+    with rejected_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if stripped:
+                raw_lines.append(stripped)
+                total += 1
+
+    entries: list[dict[str, Any]] = []
+    for raw in raw_lines:
+        try:
+            entries.append(json.loads(raw))
+        except json.JSONDecodeError:
+            entries.append({"raw": raw})
+
+    return {
+        "ok": True,
+        "action": "get_rejected",
+        "totalRejected": total,
+        "returnedCount": len(entries),
+        "entries": entries,
+    }
+
+
+def build_export_bytes(
+    log_path: Path,
+    since_minutes: int,
+    bucket_minutes: int | None,
+    subject: str,
+    fmt: str,
+) -> tuple[bytes, str]:
+    """Return (content_bytes, content_type) for CSV or JSONL export."""
+    if subject not in HISTORY_FIELDS:
+        raise ValueError("subject must be all, temperature, humidity, or pressure")
+    if fmt not in {"csv", "jsonl"}:
+        raise ValueError("format must be csv or jsonl")
+
+    observations = read_observations_in_window(log_path, since_minutes=since_minutes)
+    if bucket_minutes is not None:
+        observations = bucket_observations(observations, bucket_minutes)
+
+    fields = HISTORY_FIELDS[subject]
+    ordered_fields = ["observedAt"] + [f for f in ("temperatureC", "humidityPct", "pressureHpa") if f in fields]
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=ordered_fields, extrasaction="ignore")
+        writer.writeheader()
+        for obs in observations:
+            row = {k: obs.get(k, "") for k in ordered_fields}
+            writer.writerow(row)
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8"
+
+    # jsonl
+    lines = [
+        json.dumps({k: obs.get(k) for k in ordered_fields}, separators=(",", ":"))
+        for obs in observations
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8"), "application/x-ndjson; charset=utf-8"
 
 
 def extract_message_text(body: bytes, content_type: str) -> str:
@@ -294,6 +545,7 @@ def route_request(
     path: str,
     latest_path: Path,
     log_path: Path,
+    rejected_path: Path,
     config_path: Path | None,
 ) -> tuple[int, dict[str, Any]]:
     parsed = urlparse(path)
@@ -321,10 +573,22 @@ def route_request(
             bucket_minutes=bucket_minutes,
         )
 
+    if parsed.path == "/history":
+        params = parse_qs(parsed.query, keep_blank_values=False)
+        since_minutes = int(params.get("since_minutes", ["60"])[0])
+        bucket_minutes = int(params.get("bucket_minutes", ["5"])[0])
+        subject = params.get("subject", ["all"])[0].strip().lower()
+        return HTTPStatus.OK, build_history_payload(log_path, since_minutes, bucket_minutes, subject)
+
+    if parsed.path == "/diagnostics/rejected":
+        params = parse_qs(parsed.query, keep_blank_values=False)
+        tail = max(1, min(int(params.get("tail", ["50"])[0]), 500))
+        return HTTPStatus.OK, build_rejected_payload(rejected_path, tail)
+
     observation = load_latest_observation(latest_path)
 
     if parsed.path == "/latest":
-        return HTTPStatus.OK, observation
+        return HTTPStatus.OK, {"ok": True, "action": "get_latest", **observation}
     if parsed.path == "/latest/temp":
         return HTTPStatus.OK, build_metric_payload(observation, "temperature", "temperatureC", "C")
     if parsed.path == "/latest/humidity":
@@ -344,10 +608,17 @@ def route_webhook(
     content_type: str,
     latest_path: Path,
     log_path: Path,
+    rejected_path: Path,
     config_path: Path | None,
 ) -> tuple[int, dict[str, Any]]:
     message_text = extract_message_text(body, content_type)
-    admin_response = handle_admin_message(message_text, config_path=config_path)
+    admin_response = handle_admin_message(
+        message_text,
+        config_path=config_path,
+        log_path=log_path,
+        latest_path=latest_path,
+        rejected_path=rejected_path,
+    )
     if admin_response is not None:
         return HTTPStatus.OK, admin_response
 
@@ -394,27 +665,97 @@ def make_handler(
     latest_path: Path,
     log_path: Path | None = None,
     config_path: Path | None = None,
+    rejected_path: Path | None = None,
 ):
     active_log_path = log_path or DEFAULT_LOG_PATH
+    active_rejected_path = rejected_path or (active_log_path.parent / DEFAULT_REJECTED_PATH.name)
 
     class ApiHandler(BaseHTTPRequestHandler):
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            for header, value in _CORS_HEADERS:
+                self.send_header(header, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(HTTPStatus.NO_CONTENT)
+            for header, value in _CORS_HEADERS:
+                self.send_header(header, value)
+            self.end_headers()
+
         def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+
+            # /metrics — Prometheus text format, bypasses JSON envelope
+            if parsed.path == "/metrics":
+                try:
+                    text = build_metrics_text(latest_path, active_log_path)
+                    body = text.encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    for header, value in _CORS_HEADERS:
+                        self.send_header(header, value)
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as exc:
+                    self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(exc)})
+                return
+
+            # /export — file download, bypasses JSON envelope
+            if parsed.path == "/export":
+                params = parse_qs(parsed.query, keep_blank_values=False)
+                fmt = params.get("format", ["csv"])[0].strip().lower()
+                since_minutes = int(params.get("since_minutes", ["1440"])[0])
+                bucket_minutes_raw = params.get("bucket_minutes", [None])[0]
+                bucket_minutes = int(bucket_minutes_raw) if bucket_minutes_raw else None
+                subject = params.get("subject", ["all"])[0].strip().lower()
+                try:
+                    content, content_type = build_export_bytes(
+                        active_log_path, since_minutes, bucket_minutes, subject, fmt
+                    )
+                    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    filename = f"sensor-export-{ts}.{fmt}"
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    self.send_header("Content-Length", str(len(content)))
+                    for header, value in _CORS_HEADERS:
+                        self.send_header(header, value)
+                    self.end_headers()
+                    self.wfile.write(content)
+                except (FileNotFoundError, ValueError) as exc:
+                    self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": str(exc)})
+                return
+
             try:
-                status, payload = route_request(self.path, latest_path, active_log_path, config_path)
+                status, payload = route_request(
+                    self.path,
+                    latest_path,
+                    active_log_path,
+                    active_rejected_path,
+                    config_path,
+                )
             except (FileNotFoundError, ValueError) as exc:
                 status = HTTPStatus.SERVICE_UNAVAILABLE
                 payload = {"ok": False, "error": str(exc)}
-
-            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(status, payload)
 
         def do_POST(self) -> None:
             if self.path != "/webhook":
                 self._method_not_allowed()
+                return
+
+            client_ip = self.client_address[0]
+            if _is_rate_limited(client_ip):
+                self._send_json(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    {"ok": False, "error": "rate limit exceeded — max 10 requests per 10 s"},
+                )
                 return
 
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -422,17 +763,18 @@ def make_handler(
             body = self.rfile.read(content_length)
 
             try:
-                status, payload = route_webhook(body, content_type, latest_path, active_log_path, config_path)
+                status, payload = route_webhook(
+                    body,
+                    content_type,
+                    latest_path,
+                    active_log_path,
+                    active_rejected_path,
+                    config_path,
+                )
             except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
                 status = HTTPStatus.BAD_REQUEST
                 payload = {"ok": False, "error": str(exc)}
-
-            response = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
+            self._send_json(status, payload)
 
         def do_PUT(self) -> None:
             self._method_not_allowed()
@@ -444,12 +786,7 @@ def make_handler(
             return
 
         def _method_not_allowed(self) -> None:
-            body = json.dumps({"ok": False, "error": "read-only API"}, separators=(",", ":")).encode("utf-8")
-            self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"ok": False, "error": "read-only API"})
 
     return ApiHandler
 

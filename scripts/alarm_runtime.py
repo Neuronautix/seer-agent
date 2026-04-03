@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from observation_analysis import DEFAULT_CONFIG_PATH, load_config
+from observation_analysis import DEFAULT_CONFIG_PATH, evaluate_thresholds, load_config
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
+DEFAULT_LOG_PATH = ROOT_DIR / "logs" / "validated-observations.jsonl"
+DEFAULT_LATEST_PATH = ROOT_DIR / "logs" / "latest-observation.json"
+DEFAULT_REJECTED_PATH = ROOT_DIR / "logs" / "rejected-lines.jsonl"
 
 DEFAULT_ADMIN_PASSWORD = "8888"
 WHATSAPP_PREFIX = "@ssa"
 TEMPERATURE_ALIASES = {"temp", "temperature"}
-SHOW_KEYWORDS = {"show", "list", "status", "thresholds", "alarms"}
+SHOW_KEYWORDS = {"show", "list", "thresholds", "alarms"}
+STATUS_KEYWORDS = {"status", "health", "info", "summary"}
 UPDATE_KEYWORDS = {"set", "update", "change"}
+HISTORY_KEYWORDS = {"last", "history", "since"}
+DEFAULT_HISTORY_BUCKET_MINUTES = 5
 
 
 def get_admin_password() -> str:
@@ -116,10 +126,143 @@ def update_temperature_threshold(
     return config, adjustments
 
 
+def _count_lines(path: Path) -> int:
+    """Count non-empty lines in a file; return 0 if the file does not exist."""
+    if not path.exists():
+        return 0
+    count = 0
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if line.strip():
+                count += 1
+    return count
+
+
+def _build_status_reply(
+    config_path: Path | None,
+    log_path: Path | None = None,
+    latest_path: Path | None = None,
+    rejected_path: Path | None = None,
+) -> str:
+    """Return a compact system-health digest for the @ssa status command."""
+    resolved_log = log_path or DEFAULT_LOG_PATH
+    resolved_latest = latest_path or DEFAULT_LATEST_PATH
+    resolved_rejected = rejected_path or DEFAULT_REJECTED_PATH
+
+    now_utc = datetime.now(tz=timezone.utc)
+    lines: list[str] = [f"Status at {now_utc.strftime('%H:%M')} UTC"]
+
+    # Sensor freshness
+    if resolved_latest.exists():
+        try:
+            obs = json.loads(resolved_latest.read_text(encoding="utf-8"))
+            if not isinstance(obs, dict):
+                lines.append("Sensor: invalid latest observation format")
+            else:
+                observed_at = str(obs.get("observedAt") or "")
+                sensor_id = str(obs.get("sensorId") or "unknown")
+                if observed_at:
+                    last_dt = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                    age = int((now_utc - last_dt).total_seconds())
+                    freshness = "fresh" if age <= 300 else "STALE"
+                    lines.append(f"Sensor: {freshness} ({age}s ago) | {sensor_id}")
+                else:
+                    lines.append(f"Sensor: no timestamp | {sensor_id}")
+
+                config = load_config(config_path)
+                ev = evaluate_thresholds(obs, config)
+                ts = ev["thresholdStatus"]
+                parts: list[str] = []
+                for metric, label, unit_suffix in (
+                    ("temperature", "Temp", "°C"),
+                    ("humidity", "Hum", "%"),
+                    ("pressure", "Press", "hPa"),
+                ):
+                    m = ts.get(metric, {})
+                    if m.get("available"):
+                        status_flag = "" if m["status"] == "normal" else f" [{m['status'].upper()}]"
+                        parts.append(f"{label} {m['value']}{unit_suffix}{status_flag}")
+                if parts:
+                    lines.append(" | ".join(parts))
+                alarms = ev.get("activeAlarms", [])
+                lines.append(f"Alarms: {'none' if not alarms else ', '.join(a['metric'] for a in alarms)}")
+        except (json.JSONDecodeError, KeyError, ValueError, OSError):
+            lines.append("Sensor: error reading latest observation")
+    else:
+        lines.append("Sensor: no data yet")
+
+    # Log stats
+    obs_count = _count_lines(resolved_log)
+    rej_count = _count_lines(resolved_rejected)
+    lines.append(f"Log: {obs_count:,} observations | {rej_count} rejected")
+
+    return "\n".join(lines)
+
+
+def _parse_time_duration(token: str) -> int:
+    """Parse a duration token like '1h', '30m', '2d', '1w' into minutes."""
+    t = token.lower().strip()
+    if t.endswith("w"):
+        try:
+            return max(1, int(round(float(t[:-1]) * 7 * 24 * 60)))
+        except ValueError:
+            pass
+    elif t.endswith("d"):
+        try:
+            return max(1, int(round(float(t[:-1]) * 24 * 60)))
+        except ValueError:
+            pass
+    elif t.endswith("h"):
+        try:
+            return max(1, int(round(float(t[:-1]) * 60)))
+        except ValueError:
+            pass
+    elif t.endswith("m"):
+        try:
+            return max(1, int(t[:-1]))
+        except ValueError:
+            pass
+    raise ValueError(
+        f"Time duration must be like '30m', '1h', '2d', or '1w'. Got: '{token}'"
+    )
+
+
+def _handle_temp_history(tokens: list[str]) -> dict[str, Any]:
+    """Parse 'last 1h', 'plot last 30m', etc. and return a temp_history action dict."""
+    remaining = tokens
+    plot = False
+
+    if remaining and remaining[0].lower() == "plot":
+        plot = True
+        remaining = remaining[1:]
+
+    if not remaining or remaining[0].lower() not in HISTORY_KEYWORDS:
+        raise ValueError(
+            "Use @ssa 8888 temp last 1h or @ssa 8888 temp plot last 30m."
+        )
+    remaining = remaining[1:]  # skip 'last' / 'history' / 'since'
+
+    if not remaining:
+        raise ValueError("Specify a time range like 1h or 30m.")
+
+    since_minutes = _parse_time_duration(remaining[0])
+
+    return {
+        "ok": True,
+        "action": "temp_history",
+        "since_minutes": since_minutes,
+        "bucket_minutes": DEFAULT_HISTORY_BUCKET_MINUTES,
+        "plot": plot,
+    }
+
+
 def handle_admin_message(
     message_text: str,
     *,
     config_path: Path | None = None,
+    log_path: Path | None = None,
+    latest_path: Path | None = None,
+    rejected_path: Path | None = None,
     password: str | None = None,
 ) -> dict[str, Any] | None:
     stripped = strip_whatsapp_prefix(message_text)
@@ -144,7 +287,23 @@ def handle_admin_message(
         return {
             "ok": True,
             "action": "admin_help",
-            "reply": "Admin commands: @ssa 8888 thresholds, @ssa 8888 set temp 30, @ssa 8888 set temp critical 35.",
+            "reply": (
+                "Admin commands: @ssa 8888 status, @ssa 8888 thresholds, "
+                "@ssa 8888 set temp 30, @ssa 8888 set temp critical 35, "
+                "@ssa 8888 temp last 1h, @ssa 8888 temp plot last 30m."
+            ),
+        }
+
+    if lowered[0] in STATUS_KEYWORDS:
+        return {
+            "ok": True,
+            "action": "system_status",
+            "reply": _build_status_reply(
+                config_path,
+                log_path=log_path,
+                latest_path=latest_path,
+                rejected_path=rejected_path,
+            ),
         }
 
     config = load_config(config_path)
@@ -178,6 +337,10 @@ def handle_admin_message(
             "reply": format_temperature_thresholds(config),
             "data": _config_thresholds_only(config),
         }
+
+    # History query: "temp last 1h", "temp plot last 30m", etc.
+    if lowered[1] in HISTORY_KEYWORDS or lowered[1] == "plot":
+        return _handle_temp_history(lowered[1:])
 
     threshold_key, value, trailing = _parse_temperature_update(lowered[1:])
     if trailing:

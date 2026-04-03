@@ -13,7 +13,22 @@ LAST_DEPLOY_FILE="$ROOT_DIR/.last-deploy-commit"
 BACKUP_DEFAULT_DIR="$ROOT_DIR/backups"
 
 usage() {
-  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|deploy|rollback|backup|restore|login|bridge|gateway}" >&2
+  echo "Usage: ssa {install|up|down|restart|status|health|watchdog|deploy|rollback|backup|restore|rotate|check|login|tasks-login|bridge|gateway}" >&2
+}
+
+install_systemd_units() {
+  echo "Installing systemd units (substituting user=$USER path=$ROOT_DIR)..."
+  for unit_src in "$ROOT_DIR/deploy/systemd/"*.service "$ROOT_DIR/deploy/systemd/"*.timer; do
+    [[ -f "$unit_src" ]] || continue
+    unit_name="$(basename "$unit_src")"
+    tmp="$(mktemp)"
+    sed -e "s|/home/dhuzard/sovereign-sensor-agent|$ROOT_DIR|g" \
+        -e "s|User=dhuzard|User=$USER|g" \
+        "$unit_src" > "$tmp"
+    sudo cp "$tmp" "/etc/systemd/system/$unit_name"
+    rm -f "$tmp"
+    echo "  installed /etc/systemd/system/$unit_name"
+  done
 }
 
 print_started_message() {
@@ -43,9 +58,7 @@ case "$COMMAND" in
     sudo chmod +x "$ROOT_DIR/scripts/ssa"
     echo "Installed: $target -> $ROOT_DIR/scripts/ssa"
 
-    echo "Installing systemd units..."
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    install_systemd_units
     sudo systemctl daemon-reload
 
     # Best-effort network dependency enablement
@@ -68,6 +81,14 @@ case "$COMMAND" in
     git -C "$ROOT_DIR" rev-parse HEAD > "$LAST_DEPLOY_FILE"
     echo "Saved pre-deploy commit: $(cat "$LAST_DEPLOY_FILE")"
 
+    # Auto-backup runtime data before touching anything
+    echo "Creating pre-deploy backup..."
+    if "$ROOT_DIR/scripts/ssa" backup "$BACKUP_DEFAULT_DIR"; then
+      echo "Pre-deploy backup saved."
+    else
+      echo "Warning: no runtime data found to back up (continuing)."
+    fi
+
     echo "Stopping ingest and API..."
     sudo systemctl stop sovereign-sensor-ingest.service sovereign-sensor-api.service 2>/dev/null || true
 
@@ -78,8 +99,7 @@ case "$COMMAND" in
     "$PYTHON_BIN" -m pip install -q -r "$ROOT_DIR/requirements.txt"
 
     echo "Updating systemd units..."
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    install_systemd_units
     sudo systemctl daemon-reload
 
     echo "Restarting ingest and API..."
@@ -109,8 +129,7 @@ case "$COMMAND" in
     "$PYTHON_BIN" -m pip install -q -r "$ROOT_DIR/requirements.txt"
 
     echo "Reloading systemd units..."
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.service /etc/systemd/system/
-    sudo cp "$ROOT_DIR/deploy/systemd/"*.timer /etc/systemd/system/
+    install_systemd_units
     sudo systemctl daemon-reload
 
     echo "Restarting ingest and API..."
@@ -176,7 +195,7 @@ case "$COMMAND" in
   status)
     exec sudo systemctl --no-pager --full status sovereign-sensor-ingest.service sovereign-sensor-api.service "$STACK_SERVICE"
     ;;
-  health|check)
+  health)
     echo "=== Sovereign Sensor Agent Health ==="
     echo ""
 
@@ -229,8 +248,17 @@ except Exception as e:
   watchdog)
     exec "$PYTHON_BIN" "$ROOT_DIR/scripts/watchdog.py" "$@"
     ;;
+  rotate)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/rotate_logs.py" "$@"
+    ;;
+  check)
+    exec "$PYTHON_BIN" "$ROOT_DIR/scripts/check_env.py" "$@"
+    ;;
   login|link)
     exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-login "$@"
+    ;;
+  tasks-login|gtasks-login)
+    exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" gtasks-login "$@"
     ;;
   bridge)
     exec "$ROOT_DIR/deploy/nanobot/start_nanobot.sh" whatsapp-bridge "$@"
