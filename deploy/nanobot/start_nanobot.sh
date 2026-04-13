@@ -200,6 +200,7 @@ JSON
 }
 
 render_config() {
+  warn_default_password
   validate_whatsapp_config
   validate_gtasks_config
   cat > "$CONFIG_PATH" <<JSON
@@ -265,6 +266,14 @@ ensure_key() {
   if [[ -z "${GEMINI_API_KEY:-}" ]]; then
     echo "GEMINI_API_KEY is required. Copy deploy/nanobot/nanobot.env.example to deploy/nanobot/nanobot.env and set the key." >&2
     exit 1
+  fi
+}
+
+warn_default_password() {
+  local pwd="${SSA_ADMIN_PASSWORD:-}"
+  if [[ -z "$pwd" || "$pwd" == "8888" ]]; then
+    echo "WARNING: SSA_ADMIN_PASSWORD is not set or uses the known default." >&2
+    echo "Set a strong password in deploy/nanobot/nanobot.env before exposing the server." >&2
   fi
 }
 

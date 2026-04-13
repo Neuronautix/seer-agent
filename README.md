@@ -1,6 +1,6 @@
 # Sovereign Sensor Agent
 
-A local-first, privacy-preserving system for reading environmental sensor data from an Arduino, validating it through a deterministic Python pipeline, and exposing it through a constrained read-only interface.
+A local-first, privacy-preserving system for reading environmental sensor data from a microcontroller over serial, validating it through a deterministic Python pipeline, and exposing it through a constrained read-only interface.
 
 **Core principle:** the Python pipeline is the only source of truth. Any LLM or chat interface is limited to reading validated local files — it does not generate observations, write to storage, or access the serial port.
 
@@ -17,17 +17,18 @@ Operational runbook and day-to-day commands are in [OPERATIONS.md](OPERATIONS.md
 5. [Installation](#installation)
 6. [Running the Pipeline](#running-the-pipeline)
 7. [Testing](#testing)
-8. [Arduino Serial Format](#arduino-serial-format)
+8. [Serial Device Format](#serial-device-format)
 9. [API Reference](#api-reference)
 10. [Validation and Safety Model](#validation-and-safety-model)
 11. [WhatsApp Integration](#whatsapp-integration)
 12. [Deployment on Raspberry Pi](#deployment-on-raspberry-pi)
 13. [Default Thresholds](#default-thresholds)
 14. [Logs and Data Files](#logs-and-data-files)
-15. [Troubleshooting](#troubleshooting)
-16. [Roadmap](#roadmap)
-17. [Contributing](#contributing)
-18. [License](#license)
+15. [Extending the System](#extending-the-system)
+16. [Troubleshooting](#troubleshooting)
+17. [Roadmap](#roadmap)
+18. [Contributing](#contributing)
+19. [License](#license)
 
 ---
 
@@ -35,11 +36,11 @@ Operational runbook and day-to-day commands are in [OPERATIONS.md](OPERATIONS.md
 
 The system performs five jobs:
 
-1. Reads serial sensor lines from an Arduino (or compatible serial device).
+1. Reads serial sensor lines from a microcontroller (Arduino, ESP32, or any device producing the expected line format).
 2. Converts them into a canonical JSON-LD observation.
 3. Validates the observation against a JSON Schema and runtime range checks.
 4. Persists validated data to local append-only logs and exposes a read-only HTTP API.
-5. Optionally allows a constrained chat layer (WhatsApp via Nanobot) to answer sensor questions using only validated local files.
+5. Optionally allows a constrained chat layer to answer sensor questions using only validated local files — via WhatsApp (Nanobot), a webhook call from any provider, or any MCP-compatible client.
 
 ### What this is not
 
@@ -148,9 +149,9 @@ sovereign-sensor-agent/
 
 ## Requirements
 
-- Linux (Raspberry Pi OS or similar).
+- Linux (Raspberry Pi OS, Debian, Ubuntu, or similar).
 - Python 3.11+.
-- An Arduino or compatible serial device.
+- A microcontroller or sensor device with a serial port (Arduino, ESP32, Raspberry Pi Pico, or any device producing the expected line format over UART/USB-serial).
 - The active user must have read permissions on the serial device (typically via the `dialout` group).
 - Node.js 18+ and `npm` — required only for the WhatsApp bridge.
 
@@ -184,13 +185,13 @@ sudo usermod -aG dialout $USER
 
 All commands below are run from the repository root.
 
-### Ingest live Arduino data
+### Ingest live sensor data
 
 ```bash
 ./.venv/bin/python scripts/read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 ```
 
-Replace `/dev/ttyACM0` with your actual device path if different (e.g. `/dev/ttyUSB0`).
+Replace `/dev/ttyACM0` with your actual device path (e.g. `/dev/ttyUSB0` for USB-serial adapters) and `--sensor-id` with a descriptive name for your device.
 
 ### Test ingestion from stdin
 
@@ -264,9 +265,9 @@ There is no CI. Run the relevant test file after any change to pipeline logic.
 
 ---
 
-## Arduino Serial Format
+## Serial Device Format
 
-The ingestion script accepts two formats.
+The ingestion script works with any device that sends lines over a serial port (Arduino, ESP32, Raspberry Pi Pico, or similar). It accepts two line formats.
 
 **Canonical (preferred):**
 
@@ -590,6 +591,66 @@ All log files are git-ignored. Back them up with `ssa backup`.
 
 ---
 
+## Extending the System
+
+### Using a different LLM provider
+
+The MCP tool layer (`deploy/nanobot/mcp_server.py`) is provider-agnostic — it exposes read-only sensor tools over standard MCP stdio and has no dependency on any specific model or API. Only the Nanobot gateway configuration ties the system to Gemini.
+
+To use a different provider:
+
+1. Replace the `"gemini"` provider block in `deploy/nanobot/config.template.json` with the provider configuration supported by Nanobot (e.g. OpenAI, Anthropic, or a local Ollama endpoint).
+2. Update `NANOBOT_MODEL` in `nanobot.env` to the corresponding model identifier.
+3. Remove or replace the `GEMINI_API_KEY` variable with the appropriate key for your provider.
+
+The MCP server, workspace tools, schemas, and the deterministic Python pipeline are all unaffected by this change. The read-only boundary is enforced at the tool layer, not at the model layer.
+
+Alternatively, the workspace tools can be called directly by any MCP-compatible client without Nanobot at all:
+
+```bash
+# Any MCP client can connect to the sensor MCP server directly
+./.venv/bin/python deploy/nanobot/mcp_server.py
+```
+
+### Using a different serial device
+
+The ingestion script reads from any device that opens as a serial port and produces the expected line format. Common alternatives to Arduino:
+
+| Device | Typical port | Notes |
+|--------|-------------|-------|
+| Arduino (USB) | `/dev/ttyACM0` | Default in docs |
+| ESP32 / ESP8266 | `/dev/ttyUSB0` | CH340/CP210x USB-serial |
+| Raspberry Pi Pico | `/dev/ttyACM0` | USB CDC |
+| USB-serial adapter | `/dev/ttyUSB0` | Any device with a UART-to-USB chip |
+
+Change `--device` and `--sensor-id` when starting the ingestion script:
+
+```bash
+./.venv/bin/python scripts/read_serial.py --device /dev/ttyUSB0 --baud 115200 --sensor-id esp32-living-room
+```
+
+The baud rate must match your firmware configuration. To add a new metric field (e.g. CO2), see the "Adding a new metric" section in [CLAUDE.md](CLAUDE.md).
+
+### Using a different messaging provider
+
+The `POST /webhook` endpoint on `api_server.py` is not tied to WhatsApp or any specific provider. It accepts a plain JSON or form-encoded body with a `text` field and returns a JSON response with a `reply` field.
+
+Any service that can call an HTTP endpoint can integrate with this system:
+
+| Provider | How to connect |
+|----------|---------------|
+| Twilio SMS / WhatsApp | Set the webhook URL in the Twilio console to `POST /webhook` |
+| Telegram (via bot) | Use a webhook bot that forwards `message.text` to `POST /webhook` |
+| Slack | Use a Slack app slash command or event subscription forwarding to `POST /webhook` |
+| Custom dashboard | Call `POST /webhook` directly with `{"text": "temperature"}` |
+| Nanobot (included) | Configured by default via the MCP tool layer |
+
+In each case, expose the local API through a tunnel (e.g. `ngrok`, `cloudflared`) or reverse proxy, then point the provider's webhook configuration at your public URL.
+
+The system prompt in `workspace/WHATSAPP_SYSTEM_PROMPT.md` and the policy in `workspace/POLICY.md` can be adapted for any provider's message format.
+
+---
+
 ## Troubleshooting
 
 ### `bash: .python: command not found`
@@ -710,4 +771,4 @@ See [CLAUDE.md](CLAUDE.md) for architecture conventions and the guide for extend
 
 ## License
 
-No license has been added to this repository yet. If you intend to use or distribute this project, add an explicit `LICENSE` file (e.g. MIT or Apache 2.0) before publishing.
+This project is licensed under the [Apache License 2.0](LICENSE).

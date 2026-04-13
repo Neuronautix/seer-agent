@@ -42,7 +42,7 @@ Use these commands next:
 WhatsApp messages must start with:
   @ssa what is the current temperature?
   @ssa what is the threshold status?
-  @ssa 8888 thresholds
+  @ssa <admin-password> thresholds
 EOF
 }
 
