@@ -29,7 +29,7 @@ class AlarmRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "threshold-config.json"
 
-            response = handle_admin_message("@ssa 8888 set temp 30", config_path=config_path)
+            response = handle_admin_message("@ssa CHANGE_ME set temp 30", config_path=config_path)
 
             self.assertIsNotNone(response)
             assert response is not None
@@ -42,7 +42,7 @@ class AlarmRuntimeTests(unittest.TestCase):
             config_path = Path(temp_dir) / "threshold-config.json"
 
             with self.assertRaisesRegex(ValueError, "Critical threshold cannot be below"):
-                handle_admin_message("@ssa 8888 set temp critical 20", config_path=config_path)
+                handle_admin_message("@ssa CHANGE_ME set temp critical 20", config_path=config_path)
 
     def test_status_uses_explicit_latest_and_rejected_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -66,7 +66,7 @@ class AlarmRuntimeTests(unittest.TestCase):
             rejected_path.write_text("{}\n", encoding="utf-8")
 
             response = handle_admin_message(
-                "@ssa 8888 status",
+                "@ssa CHANGE_ME status",
                 log_path=log_path,
                 latest_path=latest_path,
                 rejected_path=rejected_path,
@@ -84,7 +84,7 @@ class AlarmRuntimeTests(unittest.TestCase):
             latest_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
 
             response = handle_admin_message(
-                "@ssa 8888 status",
+                "@ssa CHANGE_ME status",
                 latest_path=latest_path,
                 log_path=temp_path / "obs.jsonl",
                 rejected_path=temp_path / "rejected.jsonl",
@@ -338,7 +338,7 @@ class ParseTimeDurationTests(unittest.TestCase):
 
 class TempHistoryCommandTests(unittest.TestCase):
     def test_text_history_1h(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp last 1h")
+        response = handle_admin_message("@ssa CHANGE_ME temp last 1h")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "temp_history")
@@ -347,7 +347,7 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertFalse(response["plot"])
 
     def test_text_history_30m(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp last 30m")
+        response = handle_admin_message("@ssa CHANGE_ME temp last 30m")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "temp_history")
@@ -355,7 +355,7 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertFalse(response["plot"])
 
     def test_plot_history_2h(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp plot last 2h")
+        response = handle_admin_message("@ssa CHANGE_ME temp plot last 2h")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "temp_history")
@@ -363,7 +363,7 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertTrue(response["plot"])
 
     def test_plot_history_30m(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp plot last 30m")
+        response = handle_admin_message("@ssa CHANGE_ME temp plot last 30m")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "temp_history")
@@ -371,7 +371,7 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertTrue(response["plot"])
 
     def test_text_history_1w(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp last 1w")
+        response = handle_admin_message("@ssa CHANGE_ME temp last 1w")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "temp_history")
@@ -379,7 +379,7 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertFalse(response["plot"])
 
     def test_plot_history_1w(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp plot last 1w")
+        response = handle_admin_message("@ssa CHANGE_ME temp plot last 1w")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "temp_history")
@@ -387,29 +387,29 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertTrue(response["plot"])
 
     def test_text_history_3d(self) -> None:
-        response = handle_admin_message("@ssa 8888 temp last 3d")
+        response = handle_admin_message("@ssa CHANGE_ME temp last 3d")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["since_minutes"], 3 * 24 * 60)
 
     def test_history_invalid_duration_raises(self) -> None:
         with self.assertRaises(ValueError):
-            handle_admin_message("@ssa 8888 temp last xyz")
+            handle_admin_message("@ssa CHANGE_ME temp last xyz")
 
     def test_history_missing_duration_raises(self) -> None:
         with self.assertRaises(ValueError):
-            handle_admin_message("@ssa 8888 temp last")
+            handle_admin_message("@ssa CHANGE_ME temp last")
 
     def test_existing_threshold_set_still_works(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "threshold-config.json"
-            response = handle_admin_message("@ssa 8888 set temp 30", config_path=config_path)
+            response = handle_admin_message("@ssa CHANGE_ME set temp 30", config_path=config_path)
             self.assertIsNotNone(response)
             assert response is not None
             self.assertEqual(response["action"], "update_thresholds")
 
     def test_help_includes_history_commands(self) -> None:
-        response = handle_admin_message("@ssa 8888 help")
+        response = handle_admin_message("@ssa CHANGE_ME help")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertIn("temp last", response["reply"])
@@ -421,7 +421,7 @@ class TempHistoryCommandTests(unittest.TestCase):
         self.assertIsNotNone(response)
         assert response is not None
         self.assertIn("@ssa 8989 status", response["reply"])
-        self.assertNotIn("@ssa 8888 status", response["reply"])
+        self.assertNotIn("@ssa CHANGE_ME status", response["reply"])
 
 
 class TempHistoryDeliveryTests(unittest.TestCase):

@@ -16,7 +16,7 @@ DEFAULT_LOG_PATH = ROOT_DIR / "logs" / "validated-observations.jsonl"
 DEFAULT_LATEST_PATH = ROOT_DIR / "logs" / "latest-observation.json"
 DEFAULT_REJECTED_PATH = ROOT_DIR / "logs" / "rejected-lines.jsonl"
 
-DEFAULT_ADMIN_PASSWORD = "8888"
+DEFAULT_ADMIN_PASSWORD = "CHANGE_ME"
 WHATSAPP_PREFIX = "@ssa"
 TEMPERATURE_ALIASES = {"temp", "temperature"}
 SHOW_KEYWORDS = {"show", "list", "thresholds", "alarms"}

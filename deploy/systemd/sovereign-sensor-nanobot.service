@@ -6,11 +6,11 @@ Requires=sovereign-sensor-api.service
 
 [Service]
 Type=simple
-User=dhuzard
-WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
+User=ssa
+WorkingDirectory=/opt/sovereign-sensor-agent
 Environment=PYTHONUNBUFFERED=1
-ExecStartPre=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/check_env.py --service nanobot
-ExecStart=/home/dhuzard/sovereign-sensor-agent/deploy/nanobot/start_nanobot.sh up
+ExecStartPre=/opt/sovereign-sensor-agent/.venv/bin/python /opt/sovereign-sensor-agent/scripts/check_env.py --service nanobot
+ExecStart=/opt/sovereign-sensor-agent/deploy/nanobot/start_nanobot.sh up
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
