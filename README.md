@@ -18,6 +18,27 @@ The system performs five distinct jobs:
 
 This architecture is intentionally conservative. The LLM does not generate canonical observations, does not write to storage, and does not read directly from the serial port.
 
+## Demo
+
+> All screenshots live in [`docs/images/`](./docs/images/). Drop the captured
+> files in that directory using the filenames below.
+
+### Hardware
+
+![Raspberry Pi + Arduino running the sensor stack](./docs/images/hardware-pi-arduino.jpg)
+
+### WhatsApp interaction
+
+| Live sensor query | Threshold alarm | Admin command |
+|---|---|---|
+| ![WhatsApp query](./docs/images/demo-whatsapp-query.png) | ![WhatsApp alarm](./docs/images/demo-whatsapp-alarm.png) | ![Admin command](./docs/images/demo-whatsapp-admin.png) |
+
+### Local API & operations
+
+| Latest observation | Service health | Validation rejection log |
+|---|---|---|
+| ![curl /latest](./docs/images/demo-api-latest.png) | ![ssa health](./docs/images/demo-ssa-health.png) | ![rejected lines](./docs/images/demo-rejected-line.png) |
+
 ## Use Cases
 
 - Local environmental monitoring on a Raspberry Pi connected to an Arduino.
@@ -50,9 +71,93 @@ This architecture is intentionally conservative. The LLM does not generate canon
 
 ## Architecture
 
-The high-level data flow is:
+The project has one rule that explains every other design choice: **the
+Python pipeline is the only thing that writes**. The LLM, the HTTP API, and
+the WhatsApp bridge are all observers — they read from validated local files
+and never reach back into the serial port, the schemas, or the logs.
 
-`Arduino -> serial line -> read_serial.py -> build_observation.py -> ontology_guard.py -> logs -> api_server.py / workspace tools / supervisor.py -> optional chat provider`
+### Data flow
+
+```mermaid
+flowchart LR
+    A[Arduino<br/>over USB serial] --> B[read_serial.py<br/>parse]
+    B --> C[build_observation.py<br/>canonical JSON-LD]
+    C --> D[ontology_guard.py<br/>schema + range checks]
+    D -->|valid| E[(logs/validated-<br/>observations.jsonl)]
+    D -->|valid| F[(logs/latest-<br/>observation.json)]
+    D -->|invalid| G[(logs/rejected-<br/>lines.jsonl)]
+    E --> H[api_server.py<br/>read-only HTTP]
+    F --> H
+    F --> I[workspace/tools/<br/>read-only MCP tools]
+    H --> J[Local clients<br/>curl, dashboards]
+    I --> K[Nanobot LLM agent]
+    K --> L[WhatsApp bridge]
+```
+
+### Trust boundary
+
+The deterministic zone owns all writes. The observer zone — including any
+LLM — can only read validated files through narrow, audited interfaces.
+
+```mermaid
+flowchart LR
+    subgraph Det[Deterministic zone — writers]
+        direction TB
+        S1[read_serial.py]
+        S2[build_observation.py]
+        S3[ontology_guard.py]
+        S4[supervisor.py<br/>admin command path]
+        L[(Validated logs &<br/>threshold-config.json)]
+        S1 --> S2 --> S3 --> L
+        S4 --> L
+    end
+    subgraph Obs[Observer zone — read-only]
+        direction TB
+        API[api_server.py]
+        Tools[workspace/tools/*]
+        Agent[Nanobot LLM]
+        WA[WhatsApp bridge]
+        Agent --> Tools
+        Agent --> WA
+    end
+    L -. read .-> API
+    L -. read .-> Tools
+    L -. read .-> Agent
+```
+
+Anything the LLM "wants" to write becomes an intent proposal object, gated
+by `supervisor.py` and `SSA_ADMIN_PASSWORD`. The schema in
+`schemas/agent-action-v1.json` enumerates the only intents an LLM may emit.
+
+### Deployment topology
+
+A typical Raspberry Pi deployment runs three systemd services plus an
+optional WhatsApp bridge. The Arduino is wired to the Pi over USB serial.
+
+```mermaid
+flowchart TB
+    subgraph HW[Hardware]
+        AR[Arduino + sensors]
+    end
+    subgraph Pi[Raspberry Pi host]
+        direction TB
+        subgraph Sys[systemd services]
+            I[sovereign-sensor-ingest]
+            A[sovereign-sensor-api<br/>:8080 localhost]
+            N[sovereign-sensor-nanobot]
+            W[sovereign-sensor-watchdog<br/>freshness timer]
+        end
+        FS[(logs/ &<br/>threshold-config.json)]
+        Br[Node.js WhatsApp bridge<br/>:3001 localhost]
+        I --> FS
+        FS --> A
+        FS --> N
+        N --> Br
+        W --> FS
+    end
+    AR -- USB /dev/ttyACM0 --> I
+    Br <-- WebSocket --> WAcloud[WhatsApp Web]
+```
 
 ### Deterministic Pipeline
 

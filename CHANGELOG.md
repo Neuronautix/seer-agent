@@ -17,6 +17,11 @@ the rolling release.
 - `.github/` issue and pull-request templates.
 - `arduino/sense-rev2/` placeholder for the reference Arduino sketch and
   wiring notes.
+- README `Demo` section with placeholders for hardware photo and WhatsApp /
+  CLI screenshots; `docs/images/` directory with a capture and redaction
+  checklist.
+- Three Mermaid architecture diagrams (data flow, trust boundary, deployment
+  topology) replacing the previous one-line text arrow.
 
 ### Changed
 
