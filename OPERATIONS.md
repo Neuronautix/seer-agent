@@ -39,7 +39,7 @@ Edit `deploy/nanobot/nanobot.env` and set `GEMINI_API_KEY`.
 
 Use a plain Gemini model name such as `gemini-2.5-flash`.
 Do not prefix it with `gemini/` in `NANOBOT_MODEL`.
-Set `SSA_ADMIN_PASSWORD=8888` and `SSA_WHATSAPP_ALERT_TO` for the direct chat that should receive temperature alarm messages.
+Set `SSA_ADMIN_PASSWORD` to a strong, unguessable token (the example file ships with the literal placeholder `CHANGE_ME`) and `SSA_WHATSAPP_ALERT_TO` to the direct chat that should receive temperature alarm messages.
 
 ### 4. Start Nanobot locally
 
@@ -83,7 +83,7 @@ NANOBOT_WHATSAPP_SELF_CHAT_ONLY=false
 NANOBOT_WHATSAPP_GROUP_POLICY=mention
 NANOBOT_WHATSAPP_BRIDGE_URL=ws://localhost:3001
 NANOBOT_WHATSAPP_BRIDGE_TOKEN=
-SSA_ADMIN_PASSWORD=8888
+SSA_ADMIN_PASSWORD=CHANGE_ME
 SSA_WHATSAPP_ALERT_TO=REPLACE_WITH_YOUR_WHATSAPP_ID
 ```
 
@@ -96,7 +96,7 @@ Notes:
 - `NANOBOT_WHATSAPP_GROUP_POLICY=mention` keeps group chats quiet unless the linked account is explicitly mentioned.
 - The startup script now refuses `NANOBOT_WHATSAPP_ALLOW_FROM=*` unless you explicitly set `NANOBOT_WHATSAPP_ALLOW_ALL=true`.
 - Keep WhatsApp disabled until Node.js is installed.
-- `SSA_ADMIN_PASSWORD` controls the deterministic threshold-update command path and defaults to `8888`.
+- `SSA_ADMIN_PASSWORD` controls the deterministic threshold-update command path and defaults to the literal placeholder `CHANGE_ME`; set it to a strong, unguessable token before enabling the WhatsApp bridge.
 - `SSA_WHATSAPP_ALERT_TO` is the chat that receives outbound temperature alarm messages.
 
 ### Install the bridge prerequisite
@@ -140,9 +140,9 @@ That starts the bridge, the deterministic WhatsApp admin-and-alert daemon, and t
 
 Send one of these messages from an allowed chat:
 
-- `8888 thresholds`
-- `8888 set temp 30`
-- `8888 set temp critical 35`
+- `<admin-password> thresholds`
+- `<admin-password> set temp 30`
+- `<admin-password> set temp critical 35`
 
 These commands write `threshold-config.json`, which is then read by the API and local tools.
 

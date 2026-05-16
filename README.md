@@ -18,6 +18,27 @@ The system performs five distinct jobs:
 
 This architecture is intentionally conservative. The LLM does not generate canonical observations, does not write to storage, and does not read directly from the serial port.
 
+## Demo
+
+> All screenshots live in [`docs/images/`](./docs/images/). Drop the captured
+> files in that directory using the filenames below.
+
+### Hardware
+
+![Raspberry Pi + Arduino running the sensor stack](./docs/images/hardware-pi-arduino.jpg)
+
+### WhatsApp interaction
+
+| Live sensor query | Threshold alarm | Admin command |
+|---|---|---|
+| ![WhatsApp query](./docs/images/demo-whatsapp-query.png) | ![WhatsApp alarm](./docs/images/demo-whatsapp-alarm.png) | ![Admin command](./docs/images/demo-whatsapp-admin.png) |
+
+### Local API & operations
+
+| Latest observation | Service health | Validation rejection log |
+|---|---|---|
+| ![curl /latest](./docs/images/demo-api-latest.png) | ![ssa health](./docs/images/demo-ssa-health.png) | ![rejected lines](./docs/images/demo-rejected-line.png) |
+
 ## Use Cases
 
 - Local environmental monitoring on a Raspberry Pi connected to an Arduino.
@@ -50,9 +71,93 @@ This architecture is intentionally conservative. The LLM does not generate canon
 
 ## Architecture
 
-The high-level data flow is:
+The project has one rule that explains every other design choice: **the
+Python pipeline is the only thing that writes**. The LLM, the HTTP API, and
+the WhatsApp bridge are all observers — they read from validated local files
+and never reach back into the serial port, the schemas, or the logs.
 
-`Arduino -> serial line -> read_serial.py -> build_observation.py -> ontology_guard.py -> logs -> api_server.py / workspace tools / supervisor.py -> optional chat provider`
+### Data flow
+
+```mermaid
+flowchart LR
+    A[Arduino<br/>over USB serial] --> B[read_serial.py<br/>parse]
+    B --> C[build_observation.py<br/>canonical JSON-LD]
+    C --> D[ontology_guard.py<br/>schema + range checks]
+    D -->|valid| E[(logs/validated-<br/>observations.jsonl)]
+    D -->|valid| F[(logs/latest-<br/>observation.json)]
+    D -->|invalid| G[(logs/rejected-<br/>lines.jsonl)]
+    E --> H[api_server.py<br/>read-only HTTP]
+    F --> H
+    F --> I[workspace/tools/<br/>read-only MCP tools]
+    H --> J[Local clients<br/>curl, dashboards]
+    I --> K[Nanobot LLM agent]
+    K --> L[WhatsApp bridge]
+```
+
+### Trust boundary
+
+The deterministic zone owns all writes. The observer zone — including any
+LLM — can only read validated files through narrow, audited interfaces.
+
+```mermaid
+flowchart LR
+    subgraph Det[Deterministic zone — writers]
+        direction TB
+        S1[read_serial.py]
+        S2[build_observation.py]
+        S3[ontology_guard.py]
+        S4[supervisor.py<br/>admin command path]
+        L[(Validated logs &<br/>threshold-config.json)]
+        S1 --> S2 --> S3 --> L
+        S4 --> L
+    end
+    subgraph Obs[Observer zone — read-only]
+        direction TB
+        API[api_server.py]
+        Tools[workspace/tools/*]
+        Agent[Nanobot LLM]
+        WA[WhatsApp bridge]
+        Agent --> Tools
+        Agent --> WA
+    end
+    L -. read .-> API
+    L -. read .-> Tools
+    L -. read .-> Agent
+```
+
+Anything the LLM "wants" to write becomes an intent proposal object, gated
+by `supervisor.py` and `SSA_ADMIN_PASSWORD`. The schema in
+`schemas/agent-action-v1.json` enumerates the only intents an LLM may emit.
+
+### Deployment topology
+
+A typical Raspberry Pi deployment runs three systemd services plus an
+optional WhatsApp bridge. The Arduino is wired to the Pi over USB serial.
+
+```mermaid
+flowchart TB
+    subgraph HW[Hardware]
+        AR[Arduino + sensors]
+    end
+    subgraph Pi[Raspberry Pi host]
+        direction TB
+        subgraph Sys[systemd services]
+            I[sovereign-sensor-ingest]
+            A[sovereign-sensor-api<br/>:8080 localhost]
+            N[sovereign-sensor-nanobot]
+            W[sovereign-sensor-watchdog<br/>freshness timer]
+        end
+        FS[(logs/ &<br/>threshold-config.json)]
+        Br[Node.js WhatsApp bridge<br/>:3001 localhost]
+        I --> FS
+        FS --> A
+        FS --> N
+        N --> Br
+        W --> FS
+    end
+    AR -- USB /dev/ttyACM0 --> I
+    Br <-- WebSocket --> WAcloud[WhatsApp Web]
+```
 
 ### Deterministic Pipeline
 
@@ -112,14 +217,16 @@ The high-level data flow is:
 
 ```text
 .
-├── logs/
-│   ├── latest-observation.json
-│   ├── rejected-lines.jsonl
-│   └── validated-observations.jsonl
+├── arduino/
+│   └── sense-rev2/             # Reference Arduino sketch + wiring notes
+├── deploy/
+│   ├── nanobot/                # Nanobot/MCP/WhatsApp glue
+│   └── systemd/                # Systemd unit templates
+├── logs/                       # Runtime data (git-ignored)
 ├── schemas/
 │   ├── agent-action-v1.json
 │   └── sensor-observation-v1.json
-├── scripts/
+├── scripts/                    # Deterministic Python pipeline
 │   ├── api_server.py
 │   ├── build_observation.py
 │   ├── ontology_guard.py
@@ -127,7 +234,7 @@ The high-level data flow is:
 │   ├── supervisor.py
 │   ├── test_pipeline.py
 │   └── test_supervisor.py
-└── workspace/
+└── workspace/                  # LLM-facing read-only boundary
     ├── POLICY.md
     ├── WHATSAPP_SYSTEM_PROMPT.md
     └── tools/
@@ -149,7 +256,7 @@ The high-level data flow is:
 ### 1. Create and activate a virtual environment
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -206,14 +313,14 @@ Rules:
 From the repository root:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 ```
 
 From inside `scripts/`:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent/scripts
+cd ~/sovereign-sensor-agent/scripts
 python read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 ```
 
@@ -222,7 +329,7 @@ If your board appears under a different path, replace `/dev/ttyACM0` accordingly
 ### Test ingestion from stdin
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 printf 'TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
@@ -230,7 +337,7 @@ printf 'TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z\n' \
 This also works without pressure:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 printf 'TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
@@ -240,14 +347,14 @@ printf 'TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n' \
 From the repository root:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/api_server.py --host 0.0.0.0 --port 8080
 ```
 
 From inside `scripts/`:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent/scripts
+cd ~/sovereign-sensor-agent/scripts
 python api_server.py --host 0.0.0.0 --port 8080
 ```
 
@@ -271,7 +378,7 @@ curl -s http://127.0.0.1:8080/latest/threshold-status
 ### Query the deterministic supervisor
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/supervisor.py read_latest temperature
 ./.venv/bin/python scripts/supervisor.py read_latest humidity
 ./.venv/bin/python scripts/supervisor.py read_latest pressure
@@ -281,7 +388,7 @@ cd /home/dhuzard/sovereign-sensor-agent
 ### Query the local read-only tool wrappers
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python workspace/tools/get_latest_observation.py
 ./.venv/bin/python workspace/tools/get_metric.py temperature
 ./.venv/bin/python workspace/tools/get_metric.py pressure
@@ -295,7 +402,7 @@ If the connected device does not emit pressure, the pressure command returns an 
 This verifies the MCP shim exposes only the intended read-only tools and that those tools read validated local files.
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python deploy/nanobot/test_tool_layer.py
 ```
 
@@ -311,7 +418,7 @@ Expected result:
 This step requires `GEMINI_API_KEY` in `deploy/nanobot/nanobot.env`.
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
 ./deploy/nanobot/start_nanobot.sh agent --message "What is the current temperature?"
 ./deploy/nanobot/start_nanobot.sh agent --message "What is the current humidity?"
@@ -322,7 +429,7 @@ cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
 Or run the smoke-test script:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./deploy/nanobot/test_agent_answers.sh
 ```
 
@@ -416,19 +523,19 @@ Examples:
 ```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
   -H 'Content-Type: application/json' \
-  -d '{"text":"8888 thresholds"}'
+  -d '{"text":"<admin-password> thresholds"}'
 ```
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
   -H 'Content-Type: application/json' \
-  -d '{"text":"8888 set temp 30"}'
+  -d '{"text":"<admin-password> set temp 30"}'
 ```
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
   -H 'Content-Type: application/json' \
-  -d '{"text":"8888 set temp critical 35"}'
+  -d '{"text":"<admin-password> set temp critical 35"}'
 ```
 
 ## Logs and Data Files
@@ -467,7 +574,7 @@ This design makes the system easier to reason about, easier to audit, and safer 
 Run the test suite with:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/test_pipeline.py
 ./.venv/bin/python scripts/test_supervisor.py
 ```
@@ -582,9 +689,9 @@ This system is sensor-read-only, with optional Google Tasks actions. Sensor data
 ### Admin threshold commands (password required)
 
 ```
-@ssa 8888 thresholds
-@ssa 8888 set temp 30
-@ssa 8888 set temp critical 35
+@ssa <admin-password> thresholds
+@ssa <admin-password> set temp 30
+@ssa <admin-password> set temp critical 35
 ```
 
 ### What the agent cannot do
@@ -611,7 +718,7 @@ The repository supports a local WhatsApp test path through Nanobot's WhatsApp We
 ### 2. Prepare the Nanobot environment file
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
 ```
 
@@ -626,7 +733,7 @@ NANOBOT_WHATSAPP_SELF_CHAT_ONLY=false
 NANOBOT_WHATSAPP_GROUP_POLICY=mention
 NANOBOT_WHATSAPP_BRIDGE_URL=ws://localhost:3001
 NANOBOT_WHATSAPP_BRIDGE_TOKEN=
-SSA_ADMIN_PASSWORD=8888
+SSA_ADMIN_PASSWORD=CHANGE_ME
 SSA_WHATSAPP_ALERT_TO=REPLACE_WITH_YOUR_WHATSAPP_ID
 NANOBOT_ENABLE_GOOGLE_TASKS=false
 GOOGLE_TASKS_CLIENT_SECRET_FILE=
@@ -642,7 +749,7 @@ Guidance:
 - Use the phone number or LID shown in gateway logs for the allowed contact.
 - Set `NANOBOT_WHATSAPP_ALLOW_SELF_MESSAGES=true` if you want to test through the linked account's self-chat.
 - Set `NANOBOT_WHATSAPP_SELF_CHAT_ONLY=true` if you want to deny all other chats during testing.
-- `SSA_ADMIN_PASSWORD` defaults to `8888`; keep it set explicitly in the env file so the command path is obvious.
+- `SSA_ADMIN_PASSWORD` defaults to the literal placeholder `CHANGE_ME`. Set it to a strong, unguessable token in `nanobot.env` before enabling the WhatsApp bridge; `scripts/check_env.py` warns when the value is still the default.
 - `SSA_WHATSAPP_ALERT_TO` is the direct chat that receives automatic temperature alarm messages. It can match `NANOBOT_WHATSAPP_ALLOW_FROM`.
 - Set `NANOBOT_ENABLE_GOOGLE_TASKS=true` to allow task commands from WhatsApp.
 - Set `GOOGLE_TASKS_CLIENT_SECRET_FILE` to your local OAuth client JSON path, then run `ssa tasks-login`.
@@ -651,7 +758,7 @@ Guidance:
 ### 3. Optional: complete Google Tasks OAuth
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ssa tasks-login
 ```
 
@@ -660,7 +767,7 @@ This opens a local OAuth flow and writes the token used by the Google Tasks MCP 
 ### 4. Verify the read-only tool layer before linking WhatsApp
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./.venv/bin/python deploy/nanobot/test_tool_layer.py
 ```
 
@@ -669,7 +776,7 @@ Do this first so you know the agent can answer from validated sensor files befor
 ### 5. Link the WhatsApp account
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh whatsapp-login
 ```
 
@@ -678,7 +785,7 @@ Scan the QR code for WhatsApp Web. If you leave that process running after login
 ### 6. Install the ssa command and systemd services
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./scripts/ssa install
 ```
 
@@ -695,7 +802,7 @@ That service now brings up the WhatsApp bridge, the deterministic admin-and-aler
 ### 8. Start the bridge manually only if you are troubleshooting
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh whatsapp-bridge
 ```
 
@@ -707,9 +814,9 @@ Nanobot and the deterministic admin daemon now answer only to WhatsApp messages 
 
 Send one of these messages from an allowed WhatsApp chat:
 
-- `@ssa 8888 thresholds`
-- `@ssa 8888 set temp 30`
-- `@ssa 8888 set temp critical 35`
+- `@ssa <admin-password> thresholds`
+- `@ssa <admin-password> set temp 30`
+- `@ssa <admin-password> set temp critical 35`
 
 Those commands update `threshold-config.json` directly. They do not go through the model.
 
@@ -732,7 +839,7 @@ When temperature crosses into the configured warning or critical state, the What
 In another terminal:
 
 ```bash
-cd /home/dhuzard/sovereign-sensor-agent
+cd ~/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh gateway
 ```
 
@@ -893,6 +1000,18 @@ If `status` is `stale` or `waiting_for_data`, the ingest service is not running 
 sudo systemctl start sovereign-sensor-ingest.service
 ```
 
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome. See
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for development setup, testing
+guidelines, and the project's architectural invariants.
+
+## Security
+
+Please report vulnerabilities privately rather than via public issues. See
+[`SECURITY.md`](./SECURITY.md) for the disclosure process and threat-model
+notes.
+
 ## License
 
-No license has been added yet. If you plan to publish this repository publicly, add an explicit license before doing so.
+Licensed under the [Apache License, Version 2.0](./LICENSE).

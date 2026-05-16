@@ -6,11 +6,11 @@ Requires=sovereign-sensor-ingest.service
 
 [Service]
 Type=simple
-User=dhuzard
-WorkingDirectory=/home/dhuzard/sovereign-sensor-agent
+User=ssa
+WorkingDirectory=/opt/sovereign-sensor-agent
 Environment=PYTHONUNBUFFERED=1
-ExecStartPre=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/check_env.py --service api
-ExecStart=/home/dhuzard/sovereign-sensor-agent/.venv/bin/python /home/dhuzard/sovereign-sensor-agent/scripts/api_server.py --host 0.0.0.0 --port 8080
+ExecStartPre=/opt/sovereign-sensor-agent/.venv/bin/python /opt/sovereign-sensor-agent/scripts/check_env.py --service api
+ExecStart=/opt/sovereign-sensor-agent/.venv/bin/python /opt/sovereign-sensor-agent/scripts/api_server.py --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=3
 TimeoutStopSec=10
