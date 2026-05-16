@@ -588,7 +588,7 @@ class PipelineTests(unittest.TestCase):
             try:
                 update_request = urllib.request.Request(
                     f"{base_url}/webhook",
-                    data=json.dumps({"text": "@ssa 8888 set temp 30"}).encode("utf-8"),
+                    data=json.dumps({"text": "@ssa CHANGE_ME set temp 30"}).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
@@ -971,7 +971,7 @@ class TestCheckEnv(unittest.TestCase):
     def test_admin_password_warns_but_passes_on_default(self) -> None:
         from check_env import check_admin_password
         import unittest.mock as mock
-        with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "8888"}, clear=False):
+        with mock.patch.dict("os.environ", {"SSA_ADMIN_PASSWORD": "CHANGE_ME"}, clear=False):
             self.assertTrue(check_admin_password())
 
     def test_admin_password_ok_when_changed(self) -> None:
@@ -999,7 +999,7 @@ class TestCheckEnv(unittest.TestCase):
 
 
 class TestStatusCommand(unittest.TestCase):
-    """Tests for @ssa 8888 status and @ssa 8888 health commands."""
+    """Tests for @ssa CHANGE_ME status and @ssa CHANGE_ME health commands."""
 
     _OBS = {
         "@type": "SensorObservation",
@@ -1019,7 +1019,7 @@ class TestStatusCommand(unittest.TestCase):
             latest.write_text(json.dumps(self._OBS), encoding="utf-8")
             log.write_text(json.dumps(self._OBS) + "\n", encoding="utf-8")
             response = handle_admin_message(
-                "@ssa 8888 status",
+                "@ssa CHANGE_ME status",
                 log_path=log,
                 latest_path=latest,
                 rejected_path=tmp_path / "rejected.jsonl",
@@ -1039,7 +1039,7 @@ class TestStatusCommand(unittest.TestCase):
             latest = tmp_path / "latest.json"
             latest.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
             response = handle_admin_message(
-                "@ssa 8888 status",
+                "@ssa CHANGE_ME status",
                 latest_path=latest,
                 log_path=tmp_path / "obs.jsonl",
                 rejected_path=tmp_path / "rejected.jsonl",
@@ -1050,14 +1050,14 @@ class TestStatusCommand(unittest.TestCase):
 
     def test_health_alias_works(self) -> None:
         from alarm_runtime import handle_admin_message
-        response = handle_admin_message("@ssa 8888 health")
+        response = handle_admin_message("@ssa CHANGE_ME health")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertEqual(response["action"], "system_status")
 
     def test_status_included_in_help(self) -> None:
         from alarm_runtime import handle_admin_message
-        response = handle_admin_message("@ssa 8888 help")
+        response = handle_admin_message("@ssa CHANGE_ME help")
         self.assertIsNotNone(response)
         assert response is not None
         self.assertIn("status", response["reply"])
