@@ -801,8 +801,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _warn_if_default_password() -> None:
+    import sys
+    from alarm_runtime import DEFAULT_ADMIN_PASSWORD, get_admin_password
+    if get_admin_password() == DEFAULT_ADMIN_PASSWORD:
+        print(
+            "WARNING: SSA_ADMIN_PASSWORD is not set or uses the placeholder value. "
+            "Anyone who knows this value can execute admin commands via POST /webhook. "
+            "Set a strong password in deploy/nanobot/nanobot.env.",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _warn_if_default_password()
     latest_path = Path(args.latest_file)
     log_path = Path(args.log_file)
     config_path = Path(args.config_file) if args.config_file else None

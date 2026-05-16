@@ -22,6 +22,9 @@ the rolling release.
   checklist.
 - Three Mermaid architecture diagrams (data flow, trust boundary, deployment
   topology) replacing the previous one-line text arrow.
+- Runtime warnings emitted to stderr by `scripts/alarm_runtime.py`,
+  `scripts/api_server.py`, and `deploy/nanobot/start_nanobot.sh` when
+  `SSA_ADMIN_PASSWORD` is unset or still set to the `CHANGE_ME` placeholder.
 
 ### Changed
 
@@ -32,6 +35,10 @@ the rolling release.
 - Default `SSA_ADMIN_PASSWORD` is now the explicit placeholder `CHANGE_ME`
   instead of `8888`, making it obvious the value must be configured before
   enabling the WhatsApp bridge.
+- `OPERATIONS.md`: removed machine-specific state notes ("the current machine
+  does not have Node yet", "what is still missing") and rephrased remaining
+  prerequisites generically; updated WhatsApp admin-command examples to use
+  the canonical `@ssa <admin-password> ...` prefix.
 
 ## [0.1.0] - Initial public release
 

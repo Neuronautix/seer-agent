@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ DEFAULT_LATEST_PATH = ROOT_DIR / "logs" / "latest-observation.json"
 DEFAULT_REJECTED_PATH = ROOT_DIR / "logs" / "rejected-lines.jsonl"
 
 DEFAULT_ADMIN_PASSWORD = "CHANGE_ME"
+_ADMIN_PASSWORD_WARNING_ISSUED = False
 WHATSAPP_PREFIX = "@ssa"
 TEMPERATURE_ALIASES = {"temp", "temperature"}
 SHOW_KEYWORDS = {"show", "list", "thresholds", "alarms"}
@@ -27,7 +29,16 @@ DEFAULT_HISTORY_BUCKET_MINUTES = 5
 
 
 def get_admin_password() -> str:
-    return os.environ.get("SSA_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
+    global _ADMIN_PASSWORD_WARNING_ISSUED
+    pwd = os.environ.get("SSA_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
+    if not _ADMIN_PASSWORD_WARNING_ISSUED and (not pwd or pwd == DEFAULT_ADMIN_PASSWORD):
+        _ADMIN_PASSWORD_WARNING_ISSUED = True
+        print(
+            "WARNING: SSA_ADMIN_PASSWORD is not set or uses the placeholder value. "
+            "Set a strong password in deploy/nanobot/nanobot.env before exposing the server.",
+            file=sys.stderr,
+        )
+    return pwd or DEFAULT_ADMIN_PASSWORD
 
 
 def _admin_example(password: str, suffix: str) -> str:

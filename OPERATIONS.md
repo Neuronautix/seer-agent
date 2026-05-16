@@ -65,11 +65,7 @@ Full WhatsApp stack mode:
 
 Nanobot's installed WhatsApp channel uses a local Node.js bridge based on WhatsApp Web.
 
-Current prerequisite:
-
-- Node.js and npm must be installed on the Raspberry Pi.
-
-The current machine does not have them yet, so WhatsApp cannot be linked until that runtime is installed.
+Prerequisite: Node.js 18+ and npm must be installed on the host device before the WhatsApp bridge can be used.
 
 ### Configure WhatsApp in `deploy/nanobot/nanobot.env`
 
@@ -138,11 +134,11 @@ That starts the bridge, the deterministic WhatsApp admin-and-alert daemon, and t
 
 ### WhatsApp admin commands
 
-Send one of these messages from an allowed chat:
+Send one of these messages from an allowed chat (replace `<admin-password>` with your `SSA_ADMIN_PASSWORD` value):
 
-- `<admin-password> thresholds`
-- `<admin-password> set temp 30`
-- `<admin-password> set temp critical 35`
+- `@ssa <admin-password> thresholds`
+- `@ssa <admin-password> set temp 30`
+- `@ssa <admin-password> set temp critical 35`
 
 These commands write `threshold-config.json`, which is then read by the API and local tools.
 
@@ -416,10 +412,9 @@ WhatsApp auth state is restored automatically if it was included in the backup. 
 
 `nanobot.env` is **not** included because it contains secrets. Back it up separately if needed.
 
-## What Is Still Missing
+## What Is Out of Scope Here
 
-- A completed WhatsApp bridge login session.
-- Node.js and npm for Nanobot's built-in WhatsApp bridge.
-- Any public or provider-facing webhook exposure.
+- WhatsApp bridge login (run `ssa login` separately once Node.js is installed).
+- Public or provider-facing webhook exposure (requires a tunnel or reverse proxy).
 
-Those are intentionally out of scope for this local testable deployment layer.
+These are intentionally left to the deployer rather than automated by this runbook.
