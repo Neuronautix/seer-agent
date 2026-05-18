@@ -22,8 +22,8 @@ install_systemd_units() {
     [[ -f "$unit_src" ]] || continue
     unit_name="$(basename "$unit_src")"
     tmp="$(mktemp)"
-    sed -e "s|/home/dhuzard/sovereign-sensor-agent|$ROOT_DIR|g" \
-        -e "s|User=dhuzard|User=$USER|g" \
+    sed -e "s|/opt/sovereign-sensor-agent|$ROOT_DIR|g" \
+        -e "s|User=ssa|User=$USER|g" \
         "$unit_src" > "$tmp"
     sudo cp "$tmp" "/etc/systemd/system/$unit_name"
     rm -f "$tmp"

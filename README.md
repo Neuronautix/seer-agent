@@ -1,151 +1,247 @@
 # Sovereign Sensor Agent
 
-A local-first, privacy-preserving system for reading environmental sensor data from a microcontroller over serial, validating it through a deterministic Python pipeline, and exposing it through a constrained read-only interface.
+Deterministic Arduino sensor ingestion and read-only local agent interface for temperature, humidity, and optional pressure.
 
-**Core principle:** the Python pipeline is the only source of truth. Any LLM or chat interface is limited to reading validated local files — it does not generate observations, write to storage, or access the serial port.
+This repository is designed around a strict boundary: the Arduino and Python pipeline are the source of truth, while any LLM or chat interface is limited to reading validated local data. The project is intended for local-first deployments such as a Raspberry Pi connected to an Arduino over serial, with an optional messaging layer on top.
 
-Operational runbook and day-to-day commands are in [OPERATIONS.md](OPERATIONS.md).
-
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Repository Structure](#repository-structure)
-4. [Requirements](#requirements)
-5. [Installation](#installation)
-6. [Running the Pipeline](#running-the-pipeline)
-7. [Testing](#testing)
-8. [Serial Device Format](#serial-device-format)
-9. [API Reference](#api-reference)
-10. [Validation and Safety Model](#validation-and-safety-model)
-11. [WhatsApp Integration](#whatsapp-integration)
-12. [Deployment on Raspberry Pi](#deployment-on-raspberry-pi)
-13. [Default Thresholds](#default-thresholds)
-14. [Logs and Data Files](#logs-and-data-files)
-15. [Extending the System](#extending-the-system)
-16. [Troubleshooting](#troubleshooting)
-17. [Roadmap](#roadmap)
-18. [Contributing](#contributing)
-19. [License](#license)
-
----
+Nanobot-specific runtime, service, and command setup is documented in `OPERATIONS.md`.
 
 ## Overview
 
-The system performs five jobs:
+The system performs five distinct jobs:
 
-1. Reads serial sensor lines from a microcontroller (Arduino, ESP32, or any device producing the expected line format).
-2. Converts them into a canonical JSON-LD observation.
-3. Validates the observation against a JSON Schema and runtime range checks.
-4. Persists validated data to local append-only logs and exposes a read-only HTTP API.
-5. Optionally allows a constrained chat layer to answer sensor questions using only validated local files — via WhatsApp (Nanobot), a webhook call from any provider, or any MCP-compatible client.
+1. Read serial sensor lines from an Arduino.
+2. Convert those lines into a canonical JSON-LD observation.
+3. Validate the observation against a JSON Schema and additional runtime checks.
+4. Persist validated data to local logs and expose a read-only API.
+5. Allow a constrained chat layer to answer questions using validated local files only.
 
-### What this is not
+This architecture is intentionally conservative. The LLM does not generate canonical observations, does not write to storage, and does not read directly from the serial port.
 
-- Not a hosted service or cloud deployment.
+## Demo
+
+> All screenshots live in [`docs/images/`](./docs/images/). Drop the captured
+> files in that directory using the filenames below.
+
+### Hardware
+
+![Raspberry Pi + Arduino running the sensor stack](./docs/images/hardware-pi-arduino.jpg)
+
+### WhatsApp interaction
+
+| Live sensor query | Threshold alarm | Admin command |
+|---|---|---|
+| ![WhatsApp query](./docs/images/demo-whatsapp-query.png) | ![WhatsApp alarm](./docs/images/demo-whatsapp-alarm.png) | ![Admin command](./docs/images/demo-whatsapp-admin.png) |
+
+### Local API & operations
+
+| Latest observation | Service health | Validation rejection log |
+|---|---|---|
+| ![curl /latest](./docs/images/demo-api-latest.png) | ![ssa health](./docs/images/demo-ssa-health.png) | ![rejected lines](./docs/images/demo-rejected-line.png) |
+
+## Use Cases
+
+- Local environmental monitoring on a Raspberry Pi connected to an Arduino.
+- Read-only sensor queries from a local dashboard or automation layer.
+- Controlled WhatsApp or chatbot integration that can answer questions like "What is the temperature?"
+- Research or prototyping of trustworthy LLM patterns where deterministic code remains the source of truth.
+- Building a traceable ingestion pipeline with explicit schema validation and rejection logging.
+
+## Current Capabilities
+
+- Serial ingestion from `/dev/ttyACM*` or `/dev/ttyUSB*` devices.
+- Parsing of deterministic Arduino lines in the form `TEMP=...;HUM=...;TS=...` with optional `PRESS=...`.
+- Parsing of human-readable Arduino output blocks such as `Temperature = ...` and `Humidity = ...`.
+- Canonical JSON-LD observation generation.
+- Schema validation and additional range and timestamp checks.
+- Append-only validated observation log.
+- Latest observation snapshot file.
+- Rejected line log with structured error events.
+- Read-only HTTP API for latest observations and individual metrics.
+- Minimal local webhook endpoint for chat or WhatsApp-provider integration.
+- Local read-only tools for agent use.
+- Test coverage for ingestion, validation, supervisor logic, API endpoints, and webhook behavior.
+
+## What This Repo Is Not
+
+- Not a hosted WhatsApp bot by itself.
 - Not a write-capable automation agent.
-- Not a system that lets an LLM bypass the validation pipeline.
-- Not a complete production deployment — webhook authentication, public ingress, and provider configuration are left to the deployer.
-
----
+- Not a system that lets an LLM bypass validation or serial ingestion.
+- Not yet a full production deployment package with service files, auth, observability, and public ingress.
 
 ## Architecture
 
+The project has one rule that explains every other design choice: **the
+Python pipeline is the only thing that writes**. The LLM, the HTTP API, and
+the WhatsApp bridge are all observers — they read from validated local files
+and never reach back into the serial port, the schemas, or the logs.
+
+### Data flow
+
+```mermaid
+flowchart LR
+    A[Arduino<br/>over USB serial] --> B[read_serial.py<br/>parse]
+    B --> C[build_observation.py<br/>canonical JSON-LD]
+    C --> D[ontology_guard.py<br/>schema + range checks]
+    D -->|valid| E[(logs/validated-<br/>observations.jsonl)]
+    D -->|valid| F[(logs/latest-<br/>observation.json)]
+    D -->|invalid| G[(logs/rejected-<br/>lines.jsonl)]
+    E --> H[api_server.py<br/>read-only HTTP]
+    F --> H
+    F --> I[workspace/tools/<br/>read-only MCP tools]
+    H --> J[Local clients<br/>curl, dashboards]
+    I --> K[Nanobot LLM agent]
+    K --> L[WhatsApp bridge]
 ```
-Arduino (serial)
-       │
-       ▼
-read_serial.py          ← parses canonical or human-readable lines
-       │
-       ▼
-build_observation.py    ← builds canonical JSON-LD with UTC timestamp
-       │
-       ▼
-ontology_guard.py       ← JSON Schema + runtime range validation
-       │
-       ├──► logs/validated-observations.jsonl   (append-only history)
-       └──► logs/latest-observation.json        (latest snapshot)
-                │
-                ▼
-     api_server.py  /  workspace/tools  /  supervisor.py
-                │
-                ▼
-     (optional) Nanobot MCP layer → LLM → WhatsApp
+
+### Trust boundary
+
+The deterministic zone owns all writes. The observer zone — including any
+LLM — can only read validated files through narrow, audited interfaces.
+
+```mermaid
+flowchart LR
+    subgraph Det[Deterministic zone — writers]
+        direction TB
+        S1[read_serial.py]
+        S2[build_observation.py]
+        S3[ontology_guard.py]
+        S4[supervisor.py<br/>admin command path]
+        L[(Validated logs &<br/>threshold-config.json)]
+        S1 --> S2 --> S3 --> L
+        S4 --> L
+    end
+    subgraph Obs[Observer zone — read-only]
+        direction TB
+        API[api_server.py]
+        Tools[workspace/tools/*]
+        Agent[Nanobot LLM]
+        WA[WhatsApp bridge]
+        Agent --> Tools
+        Agent --> WA
+    end
+    L -. read .-> API
+    L -. read .-> Tools
+    L -. read .-> Agent
 ```
 
-### Core Components
+Anything the LLM "wants" to write becomes an intent proposal object, gated
+by `supervisor.py` and `SSA_ADMIN_PASSWORD`. The schema in
+`schemas/agent-action-v1.json` enumerates the only intents an LLM may emit.
 
-**Deterministic pipeline** (`scripts/`):
-- `read_serial.py` — ingests and parses Arduino serial lines
-- `build_observation.py` — constructs canonical JSON-LD observations
-- `ontology_guard.py` — enforces schema and runtime range constraints
-- `api_server.py` — read-only HTTP API (port 8080) and minimal webhook endpoint
-- `supervisor.py` — CLI for querying latest values and threshold status
-- `alarm_runtime.py` — threshold evaluation and alarm state logic
+### Deployment topology
 
-**LLM boundary** (`workspace/`):
-- `tools/` — read-only Python tool wrappers (MCP-compatible)
-- `POLICY.md` — enforced behavioral rules for any LLM connected to this system
-- `WHATSAPP_SYSTEM_PROMPT.md` — system prompt for WhatsApp-facing agents
+A typical Raspberry Pi deployment runs three systemd services plus an
+optional WhatsApp bridge. The Arduino is wired to the Pi over USB serial.
 
-**Schemas** (`schemas/`):
-- `sensor-observation-v1.json` — canonical observation contract (JSON Schema Draft 2020-12)
-- `agent-action-v1.json` — constrained agent intent schema
+```mermaid
+flowchart TB
+    subgraph HW[Hardware]
+        AR[Arduino + sensors]
+    end
+    subgraph Pi[Raspberry Pi host]
+        direction TB
+        subgraph Sys[systemd services]
+            I[sovereign-sensor-ingest]
+            A[sovereign-sensor-api<br/>:8080 localhost]
+            N[sovereign-sensor-nanobot]
+            W[sovereign-sensor-watchdog<br/>freshness timer]
+        end
+        FS[(logs/ &<br/>threshold-config.json)]
+        Br[Node.js WhatsApp bridge<br/>:3001 localhost]
+        I --> FS
+        FS --> A
+        FS --> N
+        N --> Br
+        W --> FS
+    end
+    AR -- USB /dev/ttyACM0 --> I
+    Br <-- WebSocket --> WAcloud[WhatsApp Web]
+```
 
-**Deployment** (`deploy/`):
-- `systemd/` — service and timer unit files
-- `nanobot/` — Nanobot agent, MCP server, WhatsApp bridge, and startup scripts
+### Deterministic Pipeline
 
----
+- `scripts/read_serial.py`
+  Reads from a serial device or stdin, parses sensor lines, validates them, writes validated records, updates the latest snapshot, and logs rejected input.
+
+- `scripts/build_observation.py`
+  Converts a raw parsed payload into the canonical JSON-LD observation shape.
+
+- `scripts/ontology_guard.py`
+  Enforces the schema contract plus runtime checks such as canonical UTC timestamps and safe value ranges.
+
+- `logs/validated-observations.jsonl`
+  Append-only validated observation history.
+
+- `logs/latest-observation.json`
+  Latest validated observation snapshot for fast reads.
+
+- `logs/rejected-lines.jsonl`
+  Structured record of rejected serial lines and validation failures.
+
+### Read-Only Access Layer
+
+- `scripts/api_server.py`
+  Exposes a local HTTP API and a minimal webhook endpoint.
+
+- `scripts/supervisor.py`
+  Deterministic read-only command handler for latest values and threshold status.
+
+- `threshold-config.json`
+  Persistent threshold state used by the API, supervisor, and WhatsApp admin command path when present.
+
+- `workspace/tools/get_latest_observation.py`
+  Returns the latest validated observation.
+
+- `workspace/tools/get_metric.py`
+  Returns a single validated metric: temperature, humidity, or pressure when present.
+
+- `workspace/tools/get_threshold_status.py`
+  Returns threshold status for temperature, humidity, and pressure, marking missing metrics as unavailable.
+
+### LLM Constraint Layer
+
+- `workspace/POLICY.md`
+  Defines the enforcement rules for LLM behavior.
+
+- `workspace/WHATSAPP_SYSTEM_PROMPT.md`
+  Defines how a WhatsApp-facing assistant should behave using only read-only local tools.
+
+- `schemas/agent-action-v1.json`
+  Contract for constrained agent intents.
+
+- `schemas/sensor-observation-v1.json`
+  Contract for canonical sensor observations.
 
 ## Repository Structure
 
 ```text
-sovereign-sensor-agent/
-├── scripts/
-│   ├── read_serial.py
+.
+├── arduino/
+│   └── sense-rev2/             # Reference Arduino sketch + wiring notes
+├── deploy/
+│   ├── nanobot/                # Nanobot/MCP/WhatsApp glue
+│   └── systemd/                # Systemd unit templates
+├── logs/                       # Runtime data (git-ignored)
+├── schemas/
+│   ├── agent-action-v1.json
+│   └── sensor-observation-v1.json
+├── scripts/                    # Deterministic Python pipeline
+│   ├── api_server.py
 │   ├── build_observation.py
 │   ├── ontology_guard.py
-│   ├── api_server.py
+│   ├── read_serial.py
 │   ├── supervisor.py
-│   ├── alarm_runtime.py
-│   ├── observation_analysis.py
-│   ├── ssa                         # CLI wrapper for systemd service control
 │   ├── test_pipeline.py
-│   ├── test_supervisor.py
-│   └── test_alarm_runtime.py
-├── workspace/
-│   ├── POLICY.md
-│   ├── WHATSAPP_SYSTEM_PROMPT.md
-│   └── tools/
-│       ├── get_latest_observation.py
-│       ├── get_metric.py
-│       ├── get_threshold_status.py
-│       ├── get_alarm_status.py
-│       └── summarize_window.py
-├── schemas/
-│   ├── sensor-observation-v1.json
-│   └── agent-action-v1.json
-├── deploy/
-│   ├── systemd/
-│   └── nanobot/
-│       ├── mcp_server.py
-│       ├── start_nanobot.sh
-│       ├── config.template.json
-│       ├── nanobot.env.example
-│       ├── whatsapp_alarm_daemon.py
-│       ├── whatsapp_bridge.py
-│       ├── test_tool_layer.py
-│       └── test_agent_answers.sh
-├── logs/                           # runtime data, git-ignored
-├── requirements.txt
-├── OPERATIONS.md
-└── README.md
+│   └── test_supervisor.py
+└── workspace/                  # LLM-facing read-only boundary
+    ├── POLICY.md
+    ├── WHATSAPP_SYSTEM_PROMPT.md
+    └── tools/
+        ├── get_latest_observation.py
+        ├── get_metric.py
+        └── get_threshold_status.py
 ```
-
----
 
 ## Requirements
 
@@ -155,43 +251,83 @@ sovereign-sensor-agent/
 - The active user must have read permissions on the serial device (typically via the `dialout` group).
 - Node.js 18+ and `npm` — required only for the WhatsApp bridge.
 
----
+## Setup
 
-## Installation
+### Clone and install
 
 ```bash
 git clone <repo-url> sovereign-sensor-agent
 cd sovereign-sensor-agent
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
 ```
 
-Confirm your serial device is visible:
+### Create a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Confirm the Arduino serial device exists
 
 ```bash
 ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 ```
 
-If you see a permission error on the serial device, add your user to the `dialout` group:
+### Confirm serial permissions
+
+The active user should generally be in the `dialout` group.
 
 ```bash
-sudo usermod -aG dialout $USER
-# log out and back in for the change to take effect
+groups
 ```
 
----
+## Expected Arduino Serial Format
 
-## Running the Pipeline
+The ingestion script accepts either a canonical single-line format or a simple human-readable multi-line format.
 
-All commands below are run from the repository root.
+Canonical format with optional pressure:
 
-### Ingest live sensor data
+```text
+TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z
+TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z
+```
+
+Human-readable format:
+
+```text
+Temperature = 19.95 °C
+Humidity    = 37.28 %
+```
+
+Rules:
+
+- `TEMP`, `HUM`, and `TS` are required in canonical format.
+- `PRESS` is optional.
+- Human-readable blocks must include temperature and humidity. Pressure may be omitted.
+- Duplicate fields are rejected.
+- Extra fields are rejected.
+- Values must be numeric where required.
+- The final observation must pass schema and range validation.
+
+## How To Run
+
+### Ingest live Arduino data
+
+From the repository root:
 
 ```bash
 ./.venv/bin/python scripts/read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 ```
 
-Replace `/dev/ttyACM0` with your actual device path (e.g. `/dev/ttyUSB0` for USB-serial adapters) and `--sensor-id` with a descriptive name for your device.
+From inside `scripts/`:
+
+```bash
+cd scripts/
+python read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
+```
+
+If your board appears under a different path, replace `/dev/ttyACM0` accordingly.
 
 ### Test ingestion from stdin
 
@@ -200,18 +336,32 @@ printf 'TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
 
-Without pressure:
+This also works without pressure:
 
 ```bash
 printf 'TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
 
-### Start the read-only API
+### Start the read-only API and webhook
+
+From the repository root:
 
 ```bash
 ./.venv/bin/python scripts/api_server.py --host 0.0.0.0 --port 8080
 ```
+
+From inside `scripts/`:
+
+```bash
+cd scripts/
+python api_server.py --host 0.0.0.0 --port 8080
+```
+
+Important:
+
+- Use `python3` or `./.venv/bin/python`.
+- Do not use `.python`; that command does not exist.
 
 ### Query the API locally
 
@@ -225,7 +375,7 @@ curl -s http://127.0.0.1:8080/latest/pressure
 curl -s http://127.0.0.1:8080/latest/threshold-status
 ```
 
-### Query using the supervisor CLI
+### Query the deterministic supervisor
 
 ```bash
 ./.venv/bin/python scripts/supervisor.py read_latest temperature
@@ -234,7 +384,7 @@ curl -s http://127.0.0.1:8080/latest/threshold-status
 ./.venv/bin/python scripts/supervisor.py get_threshold_status
 ```
 
-### Query the workspace tool wrappers directly
+### Query the local read-only tool wrappers
 
 ```bash
 ./.venv/bin/python workspace/tools/get_latest_observation.py
@@ -243,70 +393,52 @@ curl -s http://127.0.0.1:8080/latest/threshold-status
 ./.venv/bin/python workspace/tools/get_threshold_status.py
 ```
 
----
+If the connected device does not emit pressure, the pressure command returns an unavailable error while temperature and humidity remain live.
 
-## Testing
+### Verify the Nanobot tool layer
 
-Run the test suites from the repository root:
-
-```bash
-./.venv/bin/python scripts/test_pipeline.py       # 40+ unit tests
-./.venv/bin/python scripts/test_supervisor.py     # supervisor tests
-./.venv/bin/python scripts/test_alarm_runtime.py  # alarm tests
-```
-
-Run the MCP tool layer test (requires a running API server):
+This verifies the MCP shim exposes only the intended read-only tools and that those tools read validated local files.
 
 ```bash
 ./.venv/bin/python deploy/nanobot/test_tool_layer.py
 ```
 
-There is no CI. Run the relevant test file after any change to pipeline logic.
+Expected result:
 
----
+- Tool names include `get_latest_observation`, `get_metric`, and `get_threshold_status`.
+- Temperature and humidity queries return `ok: true` payloads.
+- Pressure returns a value when the sensor provides it, otherwise it reports unavailable.
+- The tool layer reads from the validated wrappers in `workspace/tools/`.
 
-## Serial Device Format
+### Ask the Nanobot agent local sensor questions
 
-The ingestion script works with any device that sends lines over a serial port (Arduino, ESP32, Raspberry Pi Pico, or similar). It accepts two line formats.
+This step requires `GEMINI_API_KEY` in `deploy/nanobot/nanobot.env`.
 
-**Canonical (preferred):**
-
-```text
-TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z
-TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z
+```bash
+cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
+./deploy/nanobot/start_nanobot.sh agent --message "What is the current temperature?"
+./deploy/nanobot/start_nanobot.sh agent --message "What is the current humidity?"
+./deploy/nanobot/start_nanobot.sh agent --message "What is the current pressure?"
+./deploy/nanobot/start_nanobot.sh agent --message "What is the threshold status?"
 ```
 
-**Human-readable (also accepted):**
+Or run the smoke-test script:
 
-```text
-Temperature = 19.95 °C
-Humidity    = 37.28 %
+```bash
+./deploy/nanobot/test_agent_answers.sh
 ```
 
-Rules:
+The Nanobot deployment is intentionally constrained:
 
-- `TEMP`, `HUM`, and `TS` are required in canonical format.
-- `PRESS` is optional.
-- Duplicate fields, unknown fields, and non-numeric values are rejected.
-- All observations must pass JSON Schema validation and runtime range checks before being persisted.
-
-Runtime range constraints enforced by `ontology_guard.py`:
-
-| Field | Min | Max |
-|-------|-----|-----|
-| `temperatureC` | −40 °C | 85 °C |
-| `humidityPct` | 0 % | 100 % |
-| `pressureHpa` | 300 hPa | 1100 hPa |
-
-Timestamps must be UTC ISO-8601 ending in `Z`.
-
----
+- It answers sensor questions through the read-only MCP tools only.
+- It does not read `/dev/tty*` directly.
+- It runs in the isolated workspace under `deploy/nanobot/workspace`.
 
 ## API Reference
 
 ### `GET /`
 
-Service summary with available endpoints.
+Returns a small service summary with the API status and a list of available endpoints. This is useful when opening the API in a browser.
 
 ### `GET /health`
 
@@ -323,40 +455,42 @@ Returns API readiness and observation freshness.
 }
 ```
 
-`status` values:
-- `"ready"` — data is under 5 minutes old
-- `"stale"` — data exists but is older than 5 minutes
-- `"waiting_for_data"` — no observation file has been written yet
+`status` is `"ready"` when data is under 5 minutes old, `"stale"` when older, and `"waiting_for_data"` when no observation file exists yet.
 
 ### `GET /latest`
 
-Full latest validated observation.
+Returns the full latest validated observation.
 
 ### `GET /latest/temp`
 
-Latest validated temperature.
+Returns the latest validated temperature.
 
 ### `GET /latest/humidity`
 
-Latest validated humidity.
+Returns the latest validated humidity.
 
 ### `GET /latest/pressure`
 
-Latest validated pressure when the sensor provides it. Returns an unavailable error if pressure is absent from the latest observation.
+Returns the latest validated pressure when the sensor provides it. If pressure is absent from the latest observation, the endpoint returns an unavailable error.
 
 ### `GET /latest/threshold-status`
 
-Threshold evaluations for all configured metrics. Missing metrics are reported as `unavailable`.
+Returns threshold evaluations for temperature, humidity, and pressure. Missing metrics are reported as `unavailable` instead of failing the whole response.
 
 ### `GET /config/thresholds`
 
-Currently active threshold configuration.
+Returns the currently active threshold configuration, including any password-protected updates that were saved from WhatsApp or the webhook.
 
 ### `POST /webhook`
 
-Minimal local chat endpoint for provider integration. Accepts `application/json` or `application/x-www-form-urlencoded`.
+Minimal local chat endpoint intended for provider integration.
 
-Sensor query example:
+Supported request styles:
+
+- `application/json`
+- `application/x-www-form-urlencoded`
+
+Examples:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
@@ -364,72 +498,170 @@ curl -s -X POST http://127.0.0.1:8080/webhook \
   -d '{"text":"what is the temperature?"}'
 ```
 
-Administrative threshold commands go through the same endpoint and require the value of `SSA_ADMIN_PASSWORD`:
+```bash
+curl -s -X POST http://127.0.0.1:8080/webhook \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'Body=what is the pressure?'
+```
+
+Typical supported questions:
+
+- temperature
+- humidity
+- pressure, when the sensor provides it
+- threshold status
+
+Administrative threshold commands are also supported through the same webhook path. These commands are deterministic and do not go through the LLM layer.
+
+Examples:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
   -H 'Content-Type: application/json' \
   -d '{"text":"<admin-password> thresholds"}'
+```
 
+```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
   -H 'Content-Type: application/json' \
   -d '{"text":"<admin-password> set temp 30"}'
+```
 
+```bash
 curl -s -X POST http://127.0.0.1:8080/webhook \
   -H 'Content-Type: application/json' \
   -d '{"text":"<admin-password> set temp critical 35"}'
 ```
 
-Replace `<admin-password>` with the value you set in `SSA_ADMIN_PASSWORD`.
+## Logs and Data Files
 
----
+### `logs/validated-observations.jsonl`
+
+- Append-only history of validated observations.
+- Good for auditing, replay, and downstream summaries.
+
+### `logs/latest-observation.json`
+
+- Most recent validated observation.
+- Fast path for HTTP API and local tool access.
+
+### `logs/rejected-lines.jsonl`
+
+- Structured diagnostics for malformed or invalid serial lines.
+- Useful when debugging Arduino output formatting or sensor anomalies.
 
 ## Validation and Safety Model
 
-This project enforces a strict boundary between deterministic code and LLM behavior:
+This project intentionally separates deterministic logic from LLM behavior.
 
-- Canonical observations are created only by Python pipeline code.
-- LLM responses must come from validated local files only.
-- The LLM must never read from `/dev/tty*` devices directly.
-- The LLM must never write to logs, schemas, or any storage.
-- Non-read-only actions are returned as proposals only, subject to deterministic review.
+Key rules:
 
-This separation makes the system easier to audit and safer to expose through a messaging interface.
+- Canonical observations are created only by Python control logic.
+- All live answers must come from validated local files.
+- The LLM must never read directly from `/dev/tty*` devices.
+- The LLM must never write to logs, schemas, or external repositories.
+- Non-read-only actions must remain proposal-only.
 
----
+This design makes the system easier to reason about, easier to audit, and safer to expose through a messaging interface.
 
-## WhatsApp Integration
+## Testing
 
-The repository includes an optional local WhatsApp bridge built on [Nanobot](https://github.com/nanobot-ai/nanobot) and WhatsApp Web. Everything runs on-device with no cloud relay.
-
-### Prerequisites
-
-- A Gemini API key.
-- Node.js 18+ and `npm` installed on the host device.
-
-### Configuration
-
-Copy the example env file and set your values:
+Run the test suite with:
 
 ```bash
-cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
+./.venv/bin/python scripts/test_pipeline.py
+./.venv/bin/python scripts/test_supervisor.py
 ```
 
-Key variables (see `nanobot.env.example` for the full list):
+## Raspberry Pi Deployment With systemd
 
-| Variable | Description |
-|----------|-------------|
-| `GEMINI_API_KEY` | Your Gemini API key |
-| `NANOBOT_ENABLE_WHATSAPP` | Set `true` to enable the WhatsApp bridge |
-| `NANOBOT_WHATSAPP_ALLOW_FROM` | Allowlisted sender IDs (comma-separated; do not use `*`) |
-| `SSA_ADMIN_PASSWORD` | Password for admin threshold commands — **change this before use** |
-| `SSA_WHATSAPP_ALERT_TO` | WhatsApp ID that receives automatic threshold alarm notifications |
+Service files for all four units are provided in `deploy/systemd/`. Install and enable them in one command:
 
-Never commit `nanobot.env`. It is already in `.gitignore`.
+```bash
+./scripts/ssa install
+```
+
+This copies the service files to `/etc/systemd/system/`, runs `daemon-reload`, and enables the correct units at boot:
+
+| Service | Boot behaviour |
+|---------|---------------|
+| `sovereign-sensor-ingest` | Enabled — starts automatically |
+| `sovereign-sensor-api` | Enabled — starts automatically |
+| `sovereign-sensor-watchdog.timer` | Enabled — freshness check every 5 min |
+| `sovereign-sensor-nanobot` | **Not** enabled — start manually with `ssa up` |
+
+### ssa command reference
+
+`scripts/ssa` is the single entry point for all day-to-day operations.
+
+```bash
+ssa install              # first-time setup: copies service files, enables ingest+api+watchdog at boot
+ssa up                   # start the Nanobot/WhatsApp stack
+ssa down                 # stop the Nanobot/WhatsApp stack
+ssa restart              # restart the Nanobot/WhatsApp stack
+ssa status               # full systemd status for all three services
+
+ssa health               # operational summary: service states, API freshness, watchdog result
+ssa watchdog             # run a one-shot freshness check, writes logs/watchdog-status.json
+
+ssa deploy               # upgrade: stop → git pull → pip install → systemd reload → restart
+ssa rollback             # revert to the commit saved by the last ssa deploy
+ssa backup [dir]         # archive logs/, threshold-config.json, WhatsApp auth state
+ssa restore <file>       # restore from a backup tarball
+ssa rotate               # archive older observations and thin mid-range history
+ssa check                # run pre-flight environment checks manually
+
+ssa login                # start WhatsApp QR-code login flow
+ssa tasks-login          # run Google Tasks OAuth login flow
+ssa bridge               # start the WhatsApp bridge process manually
+ssa gateway              # start the Nanobot gateway without the full WhatsApp stack
+```
+
+### Inspect service status and logs
+
+```bash
+ssa status
+ssa health
+journalctl -u sovereign-sensor-ingest.service -f
+journalctl -u sovereign-sensor-api.service -f
+```
+
+The current codebase has passing tests for:
+
+- sensor line parsing
+- observation construction
+- schema and range validation
+- rejection logging
+- latest snapshot updates
+- API metric endpoints
+- webhook behavior
+- supervisor responses
+- optional pressure support across the stack
+
+## WhatsApp Integration Status
+
+What exists today:
+
+- A constrained WhatsApp-oriented system prompt.
+- Read-only local tool wrappers.
+- A local webhook endpoint that a provider can call.
+- A local Nanobot WhatsApp bridge flow for linking and testing on-device.
+
+What does not exist yet:
+
+- A public webhook URL.
+- Twilio or Meta WhatsApp configuration in this repository.
+- Authentication, signature verification, or production deployment hardening.
+
+To connect a real provider, you still need to expose the local service through a tunnel, reverse proxy, or hosted deployment, then configure the provider to call `POST /webhook`.
+
+## What You Can Ask via WhatsApp
+
+This system is sensor-read-only, with optional Google Tasks actions. Sensor data stays read-only; task management runs through a separate Google Tasks MCP server.
+
+**Messages must start with `@ssa` or the agent will stay silent.** This is intentional: any message that does not begin with `@ssa` is ignored.
 
 ### Supported queries
-
-Messages must start with `@ssa`. Messages without this prefix are silently ignored.
 
 ```
 @ssa what is the temperature?
@@ -440,7 +672,7 @@ Messages must start with `@ssa`. Messages without this prefix are silently ignor
 @ssa summarize last 30 minutes
 ```
 
-### Google Tasks commands (when enabled)
+### Supported Google Tasks commands (when `NANOBOT_ENABLE_GOOGLE_TASKS=true`)
 
 ```
 @ssa add task buy filters tomorrow 09:00
@@ -448,7 +680,7 @@ Messages must start with `@ssa`. Messages without this prefix are silently ignor
 @ssa complete task TASK_ID
 ```
 
-### Admin threshold commands
+### Admin threshold commands (password required)
 
 ```
 @ssa <admin-password> thresholds
@@ -456,264 +688,291 @@ Messages must start with `@ssa`. Messages without this prefix are silently ignor
 @ssa <admin-password> set temp critical 35
 ```
 
-Replace `<admin-password>` with the value of `SSA_ADMIN_PASSWORD` from your `nanobot.env`.
-
 ### What the agent cannot do
 
-- Write to sensor logs or modify observations.
-- Control hardware or trigger actions on the device.
-- Answer questions outside sensor data (and optionally Google Tasks).
-- Execute shell commands (disabled in Nanobot config).
+- Write to sensor logs or modify observations
+- Control hardware or trigger actions on the device
+- Answer questions about topics outside sensor data
+- Perform arbitrary writes outside Google Tasks list/create/complete
 
-### WhatsApp setup steps
+If you ask for something outside the supported queries, the agent will either give the closest safe read-only answer or stay silent.
 
-1. Configure `nanobot.env` as described above.
-2. Verify the read-only tool layer (no Gemini key required):
-   ```bash
-   ./.venv/bin/python deploy/nanobot/test_tool_layer.py
-   ```
-3. Link your WhatsApp account:
-   ```bash
-   ./deploy/nanobot/start_nanobot.sh whatsapp-login
-   ```
-   Scan the QR code for WhatsApp Web.
-4. Install systemd services and start the full stack:
-   ```bash
-   ./scripts/ssa install
-   ssa up
-   ```
+---
 
-For Google Tasks integration, set `NANOBOT_ENABLE_GOOGLE_TASKS=true`, provide `GOOGLE_TASKS_CLIENT_SECRET_FILE`, then run:
+## WhatsApp Quick Start
+
+The repository supports a local WhatsApp test path through Nanobot's WhatsApp Web bridge. This is separate from the bare `POST /webhook` endpoint and is the documented way to link a WhatsApp account on the Raspberry Pi.
+
+### 1. Install prerequisites
+
+- Python environment for this repository.
+- Node.js 18 or newer.
+- `npm` available on the Raspberry Pi.
+
+### 2. Prepare the Nanobot environment file
+
+```bash
+cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
+```
+
+Set these values in `deploy/nanobot/nanobot.env`:
+
+```bash
+GEMINI_API_KEY=REPLACE_WITH_YOUR_KEY
+NANOBOT_ENABLE_WHATSAPP=true
+NANOBOT_WHATSAPP_ALLOW_FROM=REPLACE_WITH_YOUR_WHATSAPP_ID
+NANOBOT_WHATSAPP_ALLOW_SELF_MESSAGES=false
+NANOBOT_WHATSAPP_SELF_CHAT_ONLY=false
+NANOBOT_WHATSAPP_GROUP_POLICY=mention
+NANOBOT_WHATSAPP_BRIDGE_URL=ws://localhost:3001
+NANOBOT_WHATSAPP_BRIDGE_TOKEN=
+SSA_ADMIN_PASSWORD=CHANGE_ME
+SSA_WHATSAPP_ALERT_TO=REPLACE_WITH_YOUR_WHATSAPP_ID
+NANOBOT_ENABLE_GOOGLE_TASKS=false
+GOOGLE_TASKS_CLIENT_SECRET_FILE=
+GOOGLE_TASKS_TOKEN_FILE=
+GOOGLE_TASKS_OAUTH_PORT=8765
+GOOGLE_CHAT_WEBHOOK_URL=
+GOOGLE_CHAT_TIMEOUT_SECONDS=5
+```
+
+Guidance:
+
+- `NANOBOT_WHATSAPP_ALLOW_FROM` should be an explicit allowlist, not `*`.
+- Use the phone number or LID shown in gateway logs for the allowed contact.
+- Set `NANOBOT_WHATSAPP_ALLOW_SELF_MESSAGES=true` if you want to test through the linked account's self-chat.
+- Set `NANOBOT_WHATSAPP_SELF_CHAT_ONLY=true` if you want to deny all other chats during testing.
+- `SSA_ADMIN_PASSWORD` defaults to the literal placeholder `CHANGE_ME`. Set it to a strong, unguessable token in `nanobot.env` before enabling the WhatsApp bridge; `scripts/check_env.py` warns when the value is still the default.
+- `SSA_WHATSAPP_ALERT_TO` is the direct chat that receives automatic temperature alarm messages. It can match `NANOBOT_WHATSAPP_ALLOW_FROM`.
+- Set `NANOBOT_ENABLE_GOOGLE_TASKS=true` to allow task commands from WhatsApp.
+- Set `GOOGLE_TASKS_CLIENT_SECRET_FILE` to your local OAuth client JSON path, then run `ssa tasks-login`.
+- `GOOGLE_CHAT_WEBHOOK_URL` is optional; when set, task create/complete events are posted to Google Chat.
+
+### 3. Optional: complete Google Tasks OAuth
 
 ```bash
 ssa tasks-login
 ```
 
-### Testing agent responses locally
+This opens a local OAuth flow and writes the token used by the Google Tasks MCP server.
 
-This requires `GEMINI_API_KEY` in `nanobot.env`:
-
-```bash
-./deploy/nanobot/start_nanobot.sh agent --message "What is the current temperature?"
-./deploy/nanobot/start_nanobot.sh agent --message "What is the threshold status?"
-```
-
-Or run the full smoke test:
+### 4. Verify the read-only tool layer before linking WhatsApp
 
 ```bash
-./deploy/nanobot/test_agent_answers.sh
+./.venv/bin/python deploy/nanobot/test_tool_layer.py
 ```
 
----
+Do this first so you know the agent can answer from validated sensor files before you add the messaging layer.
 
-## Deployment on Raspberry Pi
+### 5. Link the WhatsApp account
 
-### Systemd Services
+```bash
+./deploy/nanobot/start_nanobot.sh whatsapp-login
+```
 
-Three services are provided in `deploy/systemd/`:
+Scan the QR code for WhatsApp Web. If you leave that process running after login, it already acts as the active bridge process.
 
-| Service | Boot | Description |
-|---------|------|-------------|
-| `sovereign-sensor-ingest` | Auto | Serial ingestion — reads Arduino, writes logs |
-| `sovereign-sensor-api` | Auto | HTTP API server — depends on ingest |
-| `sovereign-sensor-nanobot` | Manual | WhatsApp + agent stack — start with `ssa up` |
-
-A watchdog timer (`sovereign-sensor-watchdog.timer`) runs a freshness check every 5 minutes and writes `logs/watchdog-status.json`.
-
-Install everything in one command:
+### 6. Install the ssa command and systemd services
 
 ```bash
 ./scripts/ssa install
 ```
 
-This creates `/usr/local/bin/ssa`, copies service and timer files to `/etc/systemd/system/`, reloads systemd, and enables ingest, API, and the watchdog timer at boot. The Nanobot service is intentionally left disabled and started manually.
+This installs `/usr/local/bin/ssa`, copies all service and timer files to `/etc/systemd/system/`, and enables ingest, API, and the freshness watchdog timer at boot. See the [ssa command reference](#ssa-command-reference) for the full list of available commands.
 
-### ssa Command Reference
-
-`scripts/ssa` is the single entry point for all day-to-day operations:
+### 7. Start the WhatsApp stack with one command
 
 ```bash
-ssa install              # first-time setup: service files + enable ingest+api+watchdog at boot
-ssa up                   # start the Nanobot/WhatsApp stack
-ssa down                 # stop the Nanobot/WhatsApp stack
-ssa restart              # restart the Nanobot/WhatsApp stack
-ssa status               # systemd status for all services
-
-ssa health               # operational summary: states, API freshness, watchdog result
-ssa watchdog             # run a one-shot freshness check
-
-ssa deploy               # upgrade: stop → git pull → pip install → reload → restart
-ssa rollback             # revert to the commit saved by the last ssa deploy
-ssa backup [dir]         # archive logs, threshold config, WhatsApp auth state
-ssa restore <file>       # restore from backup tarball
-ssa rotate               # archive older observations and thin mid-range history
-ssa check                # run pre-flight environment checks
-
-ssa login                # WhatsApp QR-code login
-ssa tasks-login          # Google Tasks OAuth login
-ssa bridge               # start the WhatsApp bridge manually
-ssa gateway              # start the Nanobot gateway only
+ssa up
 ```
 
-### Inspect service logs
+That service now brings up the WhatsApp bridge, the deterministic admin-and-alert daemon, and the Nanobot gateway together.
+
+### 8. Start the bridge manually only if you are troubleshooting
 
 ```bash
-ssa status
-ssa health
-journalctl -u sovereign-sensor-ingest.service -f
-journalctl -u sovereign-sensor-api.service -f
+./deploy/nanobot/start_nanobot.sh whatsapp-bridge
 ```
 
----
+The bridge listens locally on `ws://127.0.0.1:3001`.
 
-## Default Thresholds
+### 9. Administrative WhatsApp commands
 
-Unless overridden by `threshold-config.json`:
+Nanobot and the deterministic admin daemon now answer only to WhatsApp messages that start with `@ssa`.
 
-| Metric | Warning | Critical |
-|--------|---------|----------|
-| Temperature | 28.0 °C | 35.0 °C |
-| Humidity | 70.0 % | 85.0 % |
-| Pressure (low band) | 980.0 hPa | 960.0 hPa |
-| Pressure (high band) | 1035.0 hPa | 1060.0 hPa |
+Send one of these messages from an allowed WhatsApp chat:
 
----
+- `@ssa <admin-password> thresholds`
+- `@ssa <admin-password> set temp 30`
+- `@ssa <admin-password> set temp critical 35`
 
-## Logs and Data Files
+Those commands update `threshold-config.json` directly. They do not go through the model.
 
-All log files are git-ignored. Back them up with `ssa backup`.
+Normal sensor questions and task commands must also start with `@ssa`, for example:
 
-| File | Description |
-|------|-------------|
-| `logs/validated-observations.jsonl` | Append-only validated observation history |
-| `logs/latest-observation.json` | Latest validated observation snapshot |
-| `logs/rejected-lines.jsonl` | Structured record of rejected serial lines and validation failures |
+- `@ssa temperature`
+- `@ssa what is the current humidity?`
+- `@ssa what is the threshold status?`
+- `@ssa add task change air filter tomorrow 09:00`
+- `@ssa list tasks`
 
----
+If the message does not start with `@ssa`, the deployment is expected to stay silent.
 
-## Extending the System
+### 10. Automatic temperature alarm messages
 
-### Using a different LLM provider
+When temperature crosses into the configured warning or critical state, the WhatsApp daemon sends an outbound message to `SSA_WHATSAPP_ALERT_TO`.
 
-The MCP tool layer (`deploy/nanobot/mcp_server.py`) is provider-agnostic — it exposes read-only sensor tools over standard MCP stdio and has no dependency on any specific model or API. Only the Nanobot gateway configuration ties the system to Gemini.
+### 11. Start the Nanobot gateway manually if you do not want the systemd wrapper
 
-To use a different provider:
-
-1. Replace the `"gemini"` provider block in `deploy/nanobot/config.template.json` with the provider configuration supported by Nanobot (e.g. OpenAI, Anthropic, or a local Ollama endpoint).
-2. Update `NANOBOT_MODEL` in `nanobot.env` to the corresponding model identifier.
-3. Remove or replace the `GEMINI_API_KEY` variable with the appropriate key for your provider.
-
-The MCP server, workspace tools, schemas, and the deterministic Python pipeline are all unaffected by this change. The read-only boundary is enforced at the tool layer, not at the model layer.
-
-Alternatively, the workspace tools can be called directly by any MCP-compatible client without Nanobot at all:
+In another terminal:
 
 ```bash
-# Any MCP client can connect to the sensor MCP server directly
-./.venv/bin/python deploy/nanobot/mcp_server.py
+./deploy/nanobot/start_nanobot.sh gateway
 ```
 
-### Using a different serial device
+### 12. Test end to end
 
-The ingestion script reads from any device that opens as a serial port and produces the expected line format. Common alternatives to Arduino:
+Send a WhatsApp message from an allowed sender such as:
 
-| Device | Typical port | Notes |
-|--------|-------------|-------|
-| Arduino (USB) | `/dev/ttyACM0` | Default in docs |
-| ESP32 / ESP8266 | `/dev/ttyUSB0` | CH340/CP210x USB-serial |
-| Raspberry Pi Pico | `/dev/ttyACM0` | USB CDC |
-| USB-serial adapter | `/dev/ttyUSB0` | Any device with a UART-to-USB chip |
+- `@ssa what is the current temperature?`
+- `@ssa what is the current humidity?`
+- `@ssa what is the current pressure?`
+- `@ssa what is the threshold status?`
+- `@ssa add task buy replacement sensor cable`
+- `@ssa list tasks`
 
-Change `--device` and `--sensor-id` when starting the ingestion script:
+Expected behavior:
 
-```bash
-./.venv/bin/python scripts/read_serial.py --device /dev/ttyUSB0 --baud 115200 --sensor-id esp32-living-room
-```
+- Nanobot answers briefly using the read-only sensor tools.
+- Task commands are routed to Google Tasks when enabled and OAuth is configured.
+- Replies come from validated local data, not from the serial device directly.
+- Pressure may be reported as unavailable if the connected sensor does not emit it.
+- Group chats remain quiet unless the linked account is mentioned when `NANOBOT_WHATSAPP_GROUP_POLICY=mention`.
 
-The baud rate must match your firmware configuration. To add a new metric field (e.g. CO2), see the "Adding a new metric" section in [CLAUDE.md](CLAUDE.md).
+Current default thresholds, unless `threshold-config.json` overrides them:
 
-### Using a different messaging provider
+- Temperature warning: `28.0 C`
+- Temperature critical: `35.0 C`
+- Humidity warning: `70.0 %`
+- Humidity critical: `85.0 %`
+- Pressure warning band: `980.0` to `1035.0 hPa`
+- Pressure critical band: `960.0` to `1060.0 hPa`
 
-The `POST /webhook` endpoint on `api_server.py` is not tied to WhatsApp or any specific provider. It accepts a plain JSON or form-encoded body with a `text` field and returns a JSON response with a `reply` field.
+If WhatsApp replies with a message such as `unable to retrieve temperature, sensor timed out`, that means the Nanobot MCP call hit its timeout, not that the ingest pipeline necessarily failed. Check these first:
 
-Any service that can call an HTTP endpoint can integrate with this system:
+- `ssa status`
+- `curl -s http://127.0.0.1:8080/latest/temp`
+- `sudo journalctl -u sovereign-sensor-nanobot.service -n 50 --no-pager`
 
-| Provider | How to connect |
-|----------|---------------|
-| Twilio SMS / WhatsApp | Set the webhook URL in the Twilio console to `POST /webhook` |
-| Telegram (via bot) | Use a webhook bot that forwards `message.text` to `POST /webhook` |
-| Slack | Use a Slack app slash command or event subscription forwarding to `POST /webhook` |
-| Custom dashboard | Call `POST /webhook` directly with `{"text": "temperature"}` |
-| Nanobot (included) | Configured by default via the MCP tool layer |
+The runtime MCP tool timeout is configured in `deploy/nanobot/start_nanobot.sh` and is now set to 30 seconds.
 
-In each case, expose the local API through a tunnel (e.g. `ngrok`, `cloudflared`) or reverse proxy, then point the provider's webhook configuration at your public URL.
+If `gateway` logs `Connect call failed ('127.0.0.1', 3001)`, the WhatsApp bridge is not running yet.
 
-The system prompt in `workspace/WHATSAPP_SYSTEM_PROMPT.md` and the policy in `workspace/POLICY.md` can be adapted for any provider's message format.
+## Professional Notes for GitHub
 
----
+This project is worth pushing to GitHub, with a few caveats:
+
+- It is already solid enough for a private repository.
+- It can become a strong public portfolio project once repository hygiene is tightened.
+- Generated logs and virtual environment files should not be treated as source-controlled artifacts.
+- A `.gitignore`, deployment notes, and a short security section would improve publication quality.
+
+Recommended publication approach:
+
+1. Push it privately first.
+2. Add provider-specific integration docs and final security hardening.
+3. Decide later whether to make it public.
+
+## Roadmap and Future Improvements
+
+### Near-Term TODO
+
+- Add webhook authentication and signature verification for real provider integrations.
+- Add structured request logging for the webhook.
+- Add a deployment guide for ngrok, cloudflared, or reverse proxy setup.
+
+### Medium-Term TODO
+
+- Add rolling summaries over the last `N` observations.
+- Add retention or rotation policy for logs.
+- Add richer threshold configuration with per-device overrides.
+- Add integration tests that exercise ingest plus API in one end-to-end flow.
+
+### Long-Term TODO
+
+- Support multiple sensor devices and multiple named sources.
+- Add authenticated dashboard or lightweight UI.
+- Add provider adapters for Twilio or Meta WhatsApp.
+- Add signed exports or downstream integrations while preserving the read-only LLM boundary.
 
 ## Troubleshooting
 
 ### `bash: .python: command not found`
 
-Use `./.venv/bin/python` or `python3` explicitly.
+Use one of these instead:
+
+```bash
+python3 scripts/api_server.py
+./.venv/bin/python scripts/api_server.py
+```
 
 ### No serial device found
+
+Check:
 
 ```bash
 ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 ```
 
-If nothing appears, check the USB cable, board power, and that the kernel has detected the device.
+If nothing appears, verify the USB cable, board power, and kernel detection.
 
 ### Permission denied on serial device
 
-```bash
-sudo usermod -aG dialout $USER
-# log out and back in
-```
-
-### API returns no latest observation
-
-The ingestion script must produce at least one validated observation before the API has data to serve. Start ingestion first, then confirm:
+Check whether the user is in `dialout`:
 
 ```bash
-curl -s http://127.0.0.1:8080/health
+groups
 ```
+
+### API says latest observation is missing
+
+Run the ingestion script first so validated data is written to `logs/latest-observation.json`.
 
 ### No reply from WhatsApp
 
 Work through this checklist in order:
 
 **1. Does the message start with `@ssa`?**
-The agent silently ignores every message that does not begin with `@ssa`. This is intentional.
+The agent silently ignores every message that does not begin with `@ssa`. This is by design.
 
 ```
-@ssa temperature        ← answered
-temperature             ← silently ignored
+@ssa temperature          ← answered
+temperature               ← silently ignored
 ```
 
 **2. Is Nanobot running?**
+Nanobot is not started automatically. Start it manually:
 
 ```bash
 ssa up
-ssa status              # sovereign-sensor-nanobot should show as active
+ssa status                # should show sovereign-sensor-nanobot active
 ```
 
-**3. Is the bridge connected?**
+**3. Is the WhatsApp bridge connected?**
 
 ```bash
+ssa status
 sudo journalctl -u sovereign-sensor-nanobot.service -n 50 --no-pager
 ```
 
-If logs show `Connect call failed ('127.0.0.1', 3001)`, the bridge is not running:
+If logs show `Connect call failed ('127.0.0.1', 3001)`, the bridge is not running. Start it:
 
 ```bash
 ssa bridge
 ```
 
 **4. Is your sender ID in the allowlist?**
-
-Check `NANOBOT_WHATSAPP_ALLOW_FROM` in `deploy/nanobot/nanobot.env`. The gateway logs print the sender ID on each incoming message.
+Check `NANOBOT_WHATSAPP_ALLOW_FROM` in `deploy/nanobot/nanobot.env`. The value must match your WhatsApp ID exactly. The gateway logs print the sender ID on each incoming message.
 
 **5. Is the ingest pipeline producing fresh data?**
 
@@ -722,53 +981,24 @@ ssa health
 curl -s http://127.0.0.1:8080/health
 ```
 
-If `status` is `stale` or `waiting_for_data`, start ingestion:
+If `status` is `stale` or `waiting_for_data`, the ingest service is not running or the Arduino is not connected. Start ingest:
 
 ```bash
 sudo systemctl start sovereign-sensor-ingest.service
 ```
 
----
-
-## Roadmap
-
-### Near term
-
-- Webhook authentication and signature verification for provider integrations.
-- Structured request logging for the webhook.
-- Deployment guide for ngrok, cloudflared, or reverse proxy setup.
-
-### Medium term
-
-- Rolling summaries over the last N observations.
-- Log rotation and retention policy.
-- Richer threshold configuration with per-device overrides.
-- Integration tests covering ingest + API end-to-end.
-
-### Long term
-
-- Multiple sensor devices and named sources.
-- Lightweight authenticated dashboard.
-- Provider adapters for Twilio or Meta WhatsApp.
-- Signed exports preserving the read-only LLM boundary.
-
----
-
 ## Contributing
 
-Bug reports and pull requests are welcome.
+Bug reports, feature requests, and pull requests are welcome. See
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for development setup, testing
+guidelines, and the project's architectural invariants.
 
-Before contributing:
+## Security
 
-1. Run the full test suite and confirm it passes.
-2. Keep pipeline logic (`scripts/`) and LLM-facing code (`workspace/`) strictly separated.
-3. Do not add write operations to `workspace/tools/`.
-4. Do not modify `schemas/` without updating `ontology_guard.py` and the test suite.
-
-See [CLAUDE.md](CLAUDE.md) for architecture conventions and the guide for extending the system.
-
----
+Please report vulnerabilities privately rather than via public issues. See
+[`SECURITY.md`](./SECURITY.md) for the disclosure process and threat-model
+notes.
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [Apache License, Version 2.0](./LICENSE).

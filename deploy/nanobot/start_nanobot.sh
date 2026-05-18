@@ -199,6 +199,14 @@ render_gtasks_server_config() {
 JSON
 }
 
+warn_default_password() {
+  local pwd="${SSA_ADMIN_PASSWORD:-}"
+  if [[ -z "$pwd" || "$pwd" == "CHANGE_ME" ]]; then
+    echo "WARNING: SSA_ADMIN_PASSWORD is not set or uses the placeholder value." >&2
+    echo "Set a strong password in deploy/nanobot/nanobot.env before exposing the server." >&2
+  fi
+}
+
 render_config() {
   warn_default_password
   validate_whatsapp_config

@@ -267,7 +267,7 @@ Any non-read-only action must be returned as a **proposal object** only, subject
 
 ### Threshold & alarm configuration
 
-Thresholds are persisted in `threshold-config.json` (runtime-generated, not committed). Admin commands require the `SSA_ADMIN_PASSWORD` token — set a strong value in `nanobot.env` before use.
+Thresholds are persisted in `threshold-config.json` (runtime-generated, not committed). Admin commands require the `SSA_ADMIN_PASSWORD` token (default is the literal placeholder `CHANGE_ME`; must be set to a real value before enabling the WhatsApp bridge).
 
 ### WhatsApp message filtering
 
@@ -291,7 +291,7 @@ Configured via `deploy/nanobot/nanobot.env` (copy from `nanobot.env.example`):
 | `NANOBOT_WHATSAPP_ALLOW_FROM` | Allowed WhatsApp sender ID | *(required if WhatsApp enabled)* |
 | `NANOBOT_WHATSAPP_BRIDGE_URL` | WhatsApp bridge WebSocket URL | `ws://localhost:3001` |
 | `NANOBOT_WHATSAPP_BRIDGE_TOKEN` | Bridge auth token | *(required if WhatsApp enabled)* |
-| `SSA_ADMIN_PASSWORD` | Password for admin threshold commands | *(required — set before use)* |
+| `SSA_ADMIN_PASSWORD` | Password for admin threshold commands | `CHANGE_ME` |
 | `SSA_WHATSAPP_ALERT_TO` | WhatsApp ID for alarm notifications | *(required for alarms)* |
 
 Never commit `nanobot.env`; it is git-ignored.

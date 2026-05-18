@@ -19,7 +19,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
-DEFAULT_ADMIN_PASSWORD = "8888"
+DEFAULT_ADMIN_PASSWORD = "CHANGE_ME"
 
 
 def _ok(msg: str) -> None:
