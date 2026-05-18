@@ -245,32 +245,36 @@ flowchart TB
 
 ## Requirements
 
-- Linux environment, typically Raspberry Pi OS.
-- Python 3.11 or compatible Python 3 runtime.
-- An Arduino or compatible device connected over serial.
-- Serial access permissions for the active user.
-- Python dependency: `jsonschema`.
+- Linux (Raspberry Pi OS, Debian, Ubuntu, or similar).
+- Python 3.11+.
+- A microcontroller or sensor device with a serial port (Arduino, ESP32, Raspberry Pi Pico, or any device producing the expected line format over UART/USB-serial).
+- The active user must have read permissions on the serial device (typically via the `dialout` group).
+- Node.js 18+ and `npm` — required only for the WhatsApp bridge.
 
 ## Setup
 
-### 1. Create and activate a virtual environment
+### Clone and install
 
 ```bash
-cd ~/sovereign-sensor-agent
+git clone <repo-url> sovereign-sensor-agent
+cd sovereign-sensor-agent
+```
+
+### Create a virtual environment
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Confirm the Arduino serial device exists
+### Confirm the Arduino serial device exists
 
 ```bash
 ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
 ```
 
-On the current Raspberry Pi environment, `/dev/ttyACM0` is present.
-
-### 3. Confirm serial permissions
+### Confirm serial permissions
 
 The active user should generally be in the `dialout` group.
 
@@ -313,14 +317,13 @@ Rules:
 From the repository root:
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 ```
 
 From inside `scripts/`:
 
 ```bash
-cd ~/sovereign-sensor-agent/scripts
+cd scripts/
 python read_serial.py --device /dev/ttyACM0 --baud 9600 --sensor-id arduino-ttyACM0
 ```
 
@@ -329,7 +332,6 @@ If your board appears under a different path, replace `/dev/ttyACM0` accordingly
 ### Test ingestion from stdin
 
 ```bash
-cd ~/sovereign-sensor-agent
 printf 'TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
@@ -337,7 +339,6 @@ printf 'TEMP=23.4;HUM=51.2;PRESS=1008.7;TS=2026-03-29T11:12:13Z\n' \
 This also works without pressure:
 
 ```bash
-cd ~/sovereign-sensor-agent
 printf 'TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n' \
   | ./.venv/bin/python scripts/read_serial.py --stdin --max-lines 1
 ```
@@ -347,14 +348,13 @@ printf 'TEMP=23.4;HUM=51.2;TS=2026-03-29T11:12:13Z\n' \
 From the repository root:
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/api_server.py --host 0.0.0.0 --port 8080
 ```
 
 From inside `scripts/`:
 
 ```bash
-cd ~/sovereign-sensor-agent/scripts
+cd scripts/
 python api_server.py --host 0.0.0.0 --port 8080
 ```
 
@@ -378,7 +378,6 @@ curl -s http://127.0.0.1:8080/latest/threshold-status
 ### Query the deterministic supervisor
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/supervisor.py read_latest temperature
 ./.venv/bin/python scripts/supervisor.py read_latest humidity
 ./.venv/bin/python scripts/supervisor.py read_latest pressure
@@ -388,7 +387,6 @@ cd ~/sovereign-sensor-agent
 ### Query the local read-only tool wrappers
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python workspace/tools/get_latest_observation.py
 ./.venv/bin/python workspace/tools/get_metric.py temperature
 ./.venv/bin/python workspace/tools/get_metric.py pressure
@@ -402,7 +400,6 @@ If the connected device does not emit pressure, the pressure command returns an 
 This verifies the MCP shim exposes only the intended read-only tools and that those tools read validated local files.
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python deploy/nanobot/test_tool_layer.py
 ```
 
@@ -418,7 +415,6 @@ Expected result:
 This step requires `GEMINI_API_KEY` in `deploy/nanobot/nanobot.env`.
 
 ```bash
-cd ~/sovereign-sensor-agent
 cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
 ./deploy/nanobot/start_nanobot.sh agent --message "What is the current temperature?"
 ./deploy/nanobot/start_nanobot.sh agent --message "What is the current humidity?"
@@ -429,7 +425,6 @@ cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
 Or run the smoke-test script:
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./deploy/nanobot/test_agent_answers.sh
 ```
 
@@ -574,7 +569,6 @@ This design makes the system easier to reason about, easier to audit, and safer 
 Run the test suite with:
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python scripts/test_pipeline.py
 ./.venv/bin/python scripts/test_supervisor.py
 ```
@@ -697,7 +691,7 @@ This system is sensor-read-only, with optional Google Tasks actions. Sensor data
 ### What the agent cannot do
 
 - Write to sensor logs or modify observations
-- Control hardware or trigger actions on the Pi
+- Control hardware or trigger actions on the device
 - Answer questions about topics outside sensor data
 - Perform arbitrary writes outside Google Tasks list/create/complete
 
@@ -718,7 +712,6 @@ The repository supports a local WhatsApp test path through Nanobot's WhatsApp We
 ### 2. Prepare the Nanobot environment file
 
 ```bash
-cd ~/sovereign-sensor-agent
 cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
 ```
 
@@ -758,7 +751,6 @@ Guidance:
 ### 3. Optional: complete Google Tasks OAuth
 
 ```bash
-cd ~/sovereign-sensor-agent
 ssa tasks-login
 ```
 
@@ -767,7 +759,6 @@ This opens a local OAuth flow and writes the token used by the Google Tasks MCP 
 ### 4. Verify the read-only tool layer before linking WhatsApp
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./.venv/bin/python deploy/nanobot/test_tool_layer.py
 ```
 
@@ -776,7 +767,6 @@ Do this first so you know the agent can answer from validated sensor files befor
 ### 5. Link the WhatsApp account
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh whatsapp-login
 ```
 
@@ -785,7 +775,6 @@ Scan the QR code for WhatsApp Web. If you leave that process running after login
 ### 6. Install the ssa command and systemd services
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./scripts/ssa install
 ```
 
@@ -802,7 +791,6 @@ That service now brings up the WhatsApp bridge, the deterministic admin-and-aler
 ### 8. Start the bridge manually only if you are troubleshooting
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh whatsapp-bridge
 ```
 
@@ -839,7 +827,6 @@ When temperature crosses into the configured warning or critical state, the What
 In another terminal:
 
 ```bash
-cd ~/sovereign-sensor-agent
 ./deploy/nanobot/start_nanobot.sh gateway
 ```
 

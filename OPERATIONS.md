@@ -73,7 +73,7 @@ Set or review these variables:
 
 ```bash
 NANOBOT_ENABLE_WHATSAPP=true
-NANOBOT_WHATSAPP_ALLOW_FROM=REPLACE_WITH_YOUR_WHATSAPP_ID
+NANOBOT_WHATSAPP_ALLOW_FROM=<your-whatsapp-sender-id>
 NANOBOT_WHATSAPP_ALLOW_SELF_MESSAGES=false
 NANOBOT_WHATSAPP_SELF_CHAT_ONLY=false
 NANOBOT_WHATSAPP_GROUP_POLICY=mention
@@ -322,7 +322,7 @@ cd sovereign-sensor-agent
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp deploy/nanobot/nanobot.env.example deploy/nanobot/nanobot.env
-# edit nanobot.env: set GEMINI_API_KEY and SSA_ADMIN_PASSWORD
+# edit nanobot.env: set GEMINI_API_KEY and a strong SSA_ADMIN_PASSWORD
 scripts/ssa install          # copies service files, enables ingest+api+watchdog at boot
 sudo systemctl start sovereign-sensor-ingest.service sovereign-sensor-api.service
 ```

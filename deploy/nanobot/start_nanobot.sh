@@ -277,6 +277,14 @@ ensure_key() {
   fi
 }
 
+warn_default_password() {
+  local pwd="${SSA_ADMIN_PASSWORD:-}"
+  if [[ -z "$pwd" || "$pwd" == "8888" ]]; then
+    echo "WARNING: SSA_ADMIN_PASSWORD is not set or uses the known default." >&2
+    echo "Set a strong password in deploy/nanobot/nanobot.env before exposing the server." >&2
+  fi
+}
+
 COMMAND="${1:-help}"
 if [[ $# -gt 0 ]]; then
   shift
